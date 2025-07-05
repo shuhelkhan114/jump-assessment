@@ -25,8 +25,8 @@ GOOGLE_REDIRECT_URI = settings.google_redirect_uri
 # Scopes for Google OAuth
 GOOGLE_SCOPES = [
     "openid",
-    "email",
-    "profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar.readonly",

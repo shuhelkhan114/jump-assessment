@@ -82,7 +82,7 @@ async def google_callback(code: str, state: str):
         
         # Get user info from Google
         credentials = flow.credentials
-        id_info = verify_google_token(credentials.id_token)
+        id_info = await verify_google_token(credentials.id_token)
         
         # Create or update user
         tokens = {
@@ -125,7 +125,7 @@ async def google_token(auth_request: GoogleAuthRequest):
         
         # Get user info from Google
         credentials = flow.credentials
-        id_info = verify_google_token(credentials.id_token)
+        id_info = await verify_google_token(credentials.id_token)
         
         # Create or update user
         tokens = {
