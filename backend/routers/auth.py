@@ -166,7 +166,8 @@ async def hubspot_login(current_user: dict = Depends(get_current_user)):
         params = {
             "client_id": settings.hubspot_client_id,
             "redirect_uri": settings.hubspot_redirect_uri,
-            "scope": "crm.objects.contacts.read crm.objects.contacts.write",
+            "scope": "oauth crm.objects.owners.read",
+            "optional_scope": "crm.objects.contacts.read crm.objects.contacts.write crm.objects.companies.read crm.objects.deals.read",
             "state": state
         }
         
