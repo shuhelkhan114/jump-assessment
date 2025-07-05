@@ -149,7 +149,7 @@ async def google_token(auth_request: GoogleAuthRequest):
         )
 
 @router.get("/hubspot/login")
-async def hubspot_login():
+async def hubspot_login(current_user: dict = Depends(get_current_user)):
     """Initiate HubSpot OAuth flow"""
     try:
         if not settings.hubspot_client_id:
@@ -160,7 +160,7 @@ async def hubspot_login():
         
         # Generate state for CSRF protection
         state = secrets.token_urlsafe(32)
-        oauth_states[state] = {"provider": "hubspot"}
+        oauth_states[state] = {"provider": "hubspot", "user_id": current_user["id"]}
         
         # HubSpot OAuth parameters
         params = {
@@ -192,6 +192,9 @@ async def hubspot_callback(code: str, state: str):
                 detail="Invalid state parameter"
             )
         
+        # Get state data before cleaning up
+        oauth_state_data = oauth_states[state]
+        
         # Clean up state
         del oauth_states[state]
         
@@ -216,8 +219,13 @@ async def hubspot_callback(code: str, state: str):
             
             tokens = token_response.json()
         
-        # TODO: Update user with HubSpot tokens
-        # For now, redirect to frontend
+        # Get current user from state (we need to identify the user)
+        user_id = oauth_state_data.get("user_id")
+        
+        if user_id:
+            # Update user with HubSpot tokens
+            await update_user_hubspot_tokens(user_id, tokens)
+        
         redirect_url = f"{settings.frontend_url}/auth/hubspot/success"
         return RedirectResponse(url=redirect_url)
         

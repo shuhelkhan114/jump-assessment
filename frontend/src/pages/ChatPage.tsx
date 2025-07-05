@@ -9,7 +9,7 @@ const HubSpotIntegration: React.FC = () => {
   React.useEffect(() => {
     const checkHubSpotStatus = async () => {
       try {
-        const response = await fetch('/api/auth/status', {
+        const response = await fetch('/auth/status', {
           headers: {
             'Authorization': `Bearer ${localStorage.getItem('token')}`
           }
@@ -31,7 +31,7 @@ const HubSpotIntegration: React.FC = () => {
     setIsLoading(true);
     try {
       // TODO: Implement HubSpot OAuth flow
-      const response = await fetch('/api/auth/hubspot/login', {
+      const response = await fetch('/auth/hubspot/login', {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
