@@ -7,8 +7,7 @@ import { Navbar } from './components/Navbar';
 import { LoginPage } from './pages/LoginPage';
 import { ChatPage } from './pages/ChatPage';
 import { AuthCallback } from './pages/AuthCallback';
-import { IntegrationsPage } from './pages/IntegrationsPage';
-import { SettingsPage } from './pages/SettingsPage';
+
 import './index.css';
 
 const queryClient = new QueryClient({
@@ -55,27 +54,7 @@ function App(): JSX.Element {
                 </ProtectedRoute>
               } />
               
-              <Route path="/integrations" element={
-                <ProtectedRoute>
-                  <div className="flex flex-col h-screen">
-                    <Navbar />
-                    <main className="flex-1 overflow-y-auto">
-                      <IntegrationsPage />
-                    </main>
-                  </div>
-                </ProtectedRoute>
-              } />
-              
-              <Route path="/settings" element={
-                <ProtectedRoute>
-                  <div className="flex flex-col h-screen">
-                    <Navbar />
-                    <main className="flex-1 overflow-y-auto">
-                      <SettingsPage />
-                    </main>
-                  </div>
-                </ProtectedRoute>
-              } />
+
             </Routes>
           </div>
         </Router>

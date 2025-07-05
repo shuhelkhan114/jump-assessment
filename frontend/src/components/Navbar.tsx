@@ -30,27 +30,7 @@ export const Navbar: React.FC = () => {
               Chat
             </Link>
 
-            <Link
-              to="/integrations"
-              className={`px-3 py-2 rounded-md text-sm font-medium ${
-                isActive('/integrations')
-                  ? 'bg-primary-100 text-primary-700'
-                  : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              Integrations
-            </Link>
 
-            <Link
-              to="/settings"
-              className={`px-3 py-2 rounded-md text-sm font-medium ${
-                isActive('/settings')
-                  ? 'bg-primary-100 text-primary-700'
-                  : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              Settings
-            </Link>
 
             <button
               onClick={logout}

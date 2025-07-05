@@ -1,5 +1,87 @@
 import React, { useState } from 'react';
-import { ChatMessage, ChatResponse } from '../types/api';
+import { ChatResponse } from '../types/api';
+
+const HubSpotIntegration: React.FC = () => {
+  const [isConnected, setIsConnected] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Check HubSpot connection status on component mount
+  React.useEffect(() => {
+    const checkHubSpotStatus = async () => {
+      try {
+        const response = await fetch('/api/auth/status', {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          }
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          setIsConnected(data.integrations?.hubspot || false);
+        }
+      } catch (error) {
+        console.error('Failed to check HubSpot status:', error);
+      }
+    };
+    
+    checkHubSpotStatus();
+  }, []);
+
+  const handleConnect = async () => {
+    setIsLoading(true);
+    try {
+      // TODO: Implement HubSpot OAuth flow
+      const response = await fetch('/api/auth/hubspot/login', {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        window.location.href = data.authorization_url;
+      }
+    } catch (error) {
+      console.error('HubSpot connection failed:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center space-x-3">
+      {!isConnected ? (
+        <button
+          onClick={handleConnect}
+          disabled={isLoading}
+          className="flex items-center px-3 py-2 bg-orange-600 text-white text-sm rounded-md hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {isLoading ? (
+            <>
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+              Connecting...
+            </>
+          ) : (
+            <>
+              <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm0 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10zm-1-7h2v2h-2v-2zm0-8h2v6h-2V7z"/>
+              </svg>
+              Connect HubSpot
+            </>
+          )}
+        </button>
+      ) : (
+        <div className="flex items-center px-3 py-2 bg-green-100 text-green-800 text-sm rounded-md">
+          <svg className="w-4 h-4 mr-2" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          HubSpot Connected
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const ChatPage: React.FC = () => {
   const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
@@ -43,8 +125,13 @@ export const ChatPage: React.FC = () => {
     <div className="flex flex-col h-full bg-white">
       {/* Chat Header */}
       <div className="border-b border-gray-200 p-4">
-        <h1 className="text-xl font-semibold text-gray-900">AI Assistant</h1>
-        <p className="text-sm text-gray-600">Ask me about your clients, emails, or schedule meetings</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold text-gray-900">AI Assistant</h1>
+            <p className="text-sm text-gray-600">Ask me about your clients, emails, or schedule meetings</p>
+          </div>
+          <HubSpotIntegration />
+        </div>
       </div>
 
       {/* Chat Messages */}
