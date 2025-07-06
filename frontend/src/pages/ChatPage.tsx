@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { ChatResponse } from '../types/api';
 
 const HubSpotIntegration: React.FC = () => {
@@ -87,6 +88,12 @@ export const ChatPage: React.FC = () => {
   const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom when messages change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isLoading]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -150,13 +157,38 @@ export const ChatPage: React.FC = () => {
               className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
               <div
-                className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
+                className={`max-w-md lg:max-w-2xl px-4 py-3 rounded-lg ${
                   message.role === 'user'
                     ? 'bg-primary-600 text-white'
                     : 'bg-gray-100 text-gray-900'
                 }`}
               >
-                {message.content}
+                <ReactMarkdown 
+                  className={`prose prose-sm ${message.role === 'user' ? 'prose-invert' : ''} max-w-none`}
+                  components={{
+                    // Custom styling for markdown elements
+                    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                    ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>,
+                    ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>,
+                    li: ({ children }) => <li className="mb-0">{children}</li>,
+                    strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+                    em: ({ children }) => <em className="italic">{children}</em>,
+                    code: ({ children }) => (
+                      <code className={`px-1 py-0.5 rounded text-sm font-mono ${
+                        message.role === 'user' 
+                          ? 'bg-primary-700 text-white' 
+                          : 'bg-gray-200 text-gray-800'
+                      }`}>
+                        {children}
+                      </code>
+                    ),
+                    h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+                    h2: ({ children }) => <h2 className="text-base font-bold mb-2">{children}</h2>,
+                    h3: ({ children }) => <h3 className="text-sm font-bold mb-1">{children}</h3>,
+                  }}
+                >
+                  {message.content}
+                </ReactMarkdown>
               </div>
             </div>
           ))
@@ -164,7 +196,7 @@ export const ChatPage: React.FC = () => {
         
         {isLoading && (
           <div className="flex justify-start">
-            <div className="bg-gray-100 text-gray-900 max-w-xs lg:max-w-md px-4 py-2 rounded-lg">
+            <div className="bg-gray-100 text-gray-900 max-w-md lg:max-w-2xl px-4 py-3 rounded-lg">
               <div className="flex items-center space-x-2">
                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary-600"></div>
                 <span>Thinking...</span>
@@ -172,6 +204,9 @@ export const ChatPage: React.FC = () => {
             </div>
           </div>
         )}
+        
+        {/* Scroll target */}
+        <div ref={messagesEndRef} />
       </div>
 
       {/* Chat Input */}

@@ -294,6 +294,8 @@ Guidelines:
 - Provide specific, actionable insights when possible
 - Reference relevant emails or contact information when answering
 - If you mention specific people or companies, cite your sources
+- Use **bold text** for emphasis and bullet points for lists
+- Format your responses with proper markdown for better readability
 - Be concise but thorough in your responses
 - If you don't have enough information, ask clarifying questions"""
 
