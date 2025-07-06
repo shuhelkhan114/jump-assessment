@@ -529,4 +529,66 @@ async def get_hubspot_sync_status(user_id: str) -> SyncStatus:
             service="hubspot",
             status="error",
             error_message=str(e)
+        )
+
+@router.post("/sync")
+async def manual_sync(current_user: dict = Depends(get_current_user)):
+    """Manual sync for all connected integrations"""
+    try:
+        sync_results = []
+        
+        # Check if user has Google OAuth and sync Gmail
+        if current_user.get("google_access_token"):
+            try:
+                from tasks.gmail_tasks import sync_gmail_emails
+                gmail_task = sync_gmail_emails.delay(current_user["id"], days_back=7)
+                sync_results.append({
+                    "service": "gmail",
+                    "status": "started",
+                    "task_id": gmail_task.id
+                })
+                logger.info(f"Manual Gmail sync started for user {current_user['id']}")
+            except Exception as e:
+                logger.error(f"Failed to start Gmail sync: {str(e)}")
+                sync_results.append({
+                    "service": "gmail",
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        # Check if user has HubSpot OAuth and sync HubSpot data
+        if current_user.get("hubspot_access_token"):
+            try:
+                from tasks.hubspot_tasks import sync_all_hubspot_data
+                hubspot_task = sync_all_hubspot_data.delay(current_user["id"])
+                sync_results.append({
+                    "service": "hubspot",
+                    "status": "started",
+                    "task_id": hubspot_task.id
+                })
+                logger.info(f"Manual HubSpot sync started for user {current_user['id']}")
+            except Exception as e:
+                logger.error(f"Failed to start HubSpot sync: {str(e)}")
+                sync_results.append({
+                    "service": "hubspot",
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        if not sync_results:
+            return {
+                "message": "No connected integrations to sync",
+                "sync_results": []
+            }
+        
+        return {
+            "message": "Manual sync started for connected integrations",
+            "sync_results": sync_results
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to start manual sync: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start manual sync"
         ) 

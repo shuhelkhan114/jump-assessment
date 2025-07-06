@@ -46,6 +46,27 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         const data = await response.json();
         setUser(data.user);
         setAuthStatus(data);
+        
+        // Trigger sync on app load if user has connected integrations
+        if (data.integrations && (data.integrations.google || data.integrations.hubspot)) {
+          try {
+            const syncResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/integrations/sync`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+            });
+            
+            if (syncResponse.ok) {
+              const syncResult = await syncResponse.json();
+              console.log('Auto-sync on app load started:', syncResult);
+            }
+          } catch (syncError) {
+            console.log('Auto-sync on app load failed (non-critical):', syncError);
+            // Don't fail app loading if sync fails
+          }
+        }
       } else {
         // Token is invalid, remove it
         localStorage.removeItem('token');

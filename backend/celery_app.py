@@ -31,13 +31,9 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     # Periodic task schedule
     beat_schedule={
-        'sync-all-data': {
-            'task': 'tasks.auto_sync_tasks.sync_all_data',
-            'schedule': 300.0,  # Run every 5 minutes (300 seconds)
-        },
         'refresh-expiring-tokens': {
             'task': 'tasks.auto_sync_tasks.refresh_expiring_tokens', 
-            'schedule': 900.0,  # Run every 15 minutes (900 seconds) - proactive refresh
+            'schedule': 900.0,  # Run every 15 minutes (900 seconds) - proactive token refresh
         },
     },
 )

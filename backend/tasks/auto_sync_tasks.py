@@ -256,28 +256,6 @@ def trigger_hubspot_sync(user_id: str):
         return {"error": str(e)}
 
 @celery_app.task(bind=True)
-def sync_all_data(self):
-    """Main sync task that triggers all data synchronization"""
-    try:
-        logger.info("Starting automatic data sync for all users")
-        
-        # First, proactively refresh any tokens that are about to expire
-        refresh_expiring_tokens.delay()
-        
-        # Then run the actual sync tasks
-        sync_all_users_gmail.delay()
-        
-        # Schedule HubSpot sync for all users  
-        sync_all_users_hubspot.delay()
-        
-        logger.info("Automatic data sync scheduled for all users")
-        return {"status": "success", "message": "Data sync scheduled for all users"}
-        
-    except Exception as e:
-        logger.error(f"Failed to schedule automatic data sync: {str(e)}")
-        raise self.retry(exc=e, countdown=300, max_retries=3)
-
-@celery_app.task(bind=True)
 def refresh_expiring_tokens(self):
     """Proactively refresh Google tokens that are about to expire"""
     try:
