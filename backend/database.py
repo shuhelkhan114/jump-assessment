@@ -49,6 +49,9 @@ class User(Base):
     emails = relationship("Email", back_populates="user")
     conversations = relationship("Conversation", back_populates="user")
     ongoing_instructions = relationship("OngoingInstruction", back_populates="user")
+    hubspot_contacts = relationship("HubspotContact", back_populates="user")
+    hubspot_deals = relationship("HubspotDeal", back_populates="user")
+    hubspot_companies = relationship("HubspotCompany", back_populates="user")
 
 class Email(Base):
     __tablename__ = "emails"
@@ -58,13 +61,14 @@ class Email(Base):
     gmail_id = Column(String, unique=True, nullable=False)
     thread_id = Column(String, nullable=True)
     subject = Column(Text, nullable=True)
-    body = Column(Text, nullable=True)
+    content = Column(Text, nullable=True)  # Renamed from body to content
     sender = Column(String, nullable=True)
     recipient = Column(String, nullable=True)
-    date = Column(DateTime, nullable=True)
+    received_at = Column(DateTime, nullable=True)  # Renamed from date to received_at
     is_read = Column(Boolean, default=False)
-    is_sent = Column(Boolean, default=False)
+    labels = Column(Text, nullable=True)  # Store Gmail labels as JSON string
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Vector embedding for RAG
     embedding = Column(Vector(1536), nullable=True)
@@ -78,11 +82,19 @@ class HubspotContact(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     hubspot_id = Column(String, nullable=False)
-    name = Column(String, nullable=True)
+    firstname = Column(String, nullable=True)
+    lastname = Column(String, nullable=True)
     email = Column(String, nullable=True)
     phone = Column(String, nullable=True)
     company = Column(String, nullable=True)
-    notes = Column(Text, nullable=True)
+    jobtitle = Column(String, nullable=True)
+    industry = Column(String, nullable=True)
+    lifecyclestage = Column(String, nullable=True)
+    lead_status = Column(String, nullable=True)
+    notes_last_contacted = Column(DateTime, nullable=True)
+    notes_last_activity_date = Column(DateTime, nullable=True)
+    num_notes = Column(Integer, nullable=True)
+    properties = Column(Text, nullable=True)  # Store additional properties as JSON
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -91,6 +103,70 @@ class HubspotContact(Base):
     
     # Relationships
     user = relationship("User")
+    deals = relationship("HubspotDeal", back_populates="contact")
+
+class HubspotDeal(Base):
+    __tablename__ = "hubspot_deals"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    hubspot_id = Column(String, nullable=False)
+    dealname = Column(String, nullable=True)
+    amount = Column(Float, nullable=True)
+    dealstage = Column(String, nullable=True)
+    pipeline = Column(String, nullable=True)
+    closedate = Column(DateTime, nullable=True)
+    dealtype = Column(String, nullable=True)
+    description = Column(Text, nullable=True)
+    notes_last_contacted = Column(DateTime, nullable=True)
+    notes_last_activity_date = Column(DateTime, nullable=True)
+    num_notes = Column(Integer, nullable=True)
+    hubspot_owner_id = Column(String, nullable=True)
+    contact_id = Column(String, ForeignKey("hubspot_contacts.id"), nullable=True)
+    company_id = Column(String, ForeignKey("hubspot_companies.id"), nullable=True)
+    properties = Column(Text, nullable=True)  # Store additional properties as JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Vector embedding for RAG
+    embedding = Column(Vector(1536), nullable=True)
+    
+    # Relationships
+    user = relationship("User")
+    contact = relationship("HubspotContact", back_populates="deals")
+    company = relationship("HubspotCompany", back_populates="deals")
+
+class HubspotCompany(Base):
+    __tablename__ = "hubspot_companies"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    hubspot_id = Column(String, nullable=False)
+    name = Column(String, nullable=True)
+    domain = Column(String, nullable=True)
+    industry = Column(String, nullable=True)
+    type = Column(String, nullable=True)
+    description = Column(Text, nullable=True)
+    phone = Column(String, nullable=True)
+    address = Column(String, nullable=True)
+    city = Column(String, nullable=True)
+    state = Column(String, nullable=True)
+    country = Column(String, nullable=True)
+    num_employees = Column(Integer, nullable=True)
+    annualrevenue = Column(Float, nullable=True)
+    notes_last_contacted = Column(DateTime, nullable=True)
+    notes_last_activity_date = Column(DateTime, nullable=True)
+    num_notes = Column(Integer, nullable=True)
+    properties = Column(Text, nullable=True)  # Store additional properties as JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Vector embedding for RAG
+    embedding = Column(Vector(1536), nullable=True)
+    
+    # Relationships
+    user = relationship("User")
+    deals = relationship("HubspotDeal", back_populates="company")
 
 class Conversation(Base):
     __tablename__ = "conversations"

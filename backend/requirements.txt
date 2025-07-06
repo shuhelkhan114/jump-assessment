@@ -32,6 +32,7 @@ httpx==0.25.2
 aiofiles==23.2.0
 celery==5.3.4
 redis==5.0.1
+beautifulsoup4==4.12.2
 
 # CORS
 fastapi-cors==0.0.6

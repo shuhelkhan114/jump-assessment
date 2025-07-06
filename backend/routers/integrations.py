@@ -56,24 +56,54 @@ async def get_sync_status(current_user: dict = Depends(get_current_user)):
 
 @router.post("/gmail/sync")
 async def sync_gmail(
+    days_back: int = 30,
     current_user: dict = Depends(require_google_auth)
 ):
     """Sync Gmail data"""
     try:
-        if celery_app:
-            # Use Celery for background processing
-            task = celery_app.send_task("sync_gmail_data", args=[current_user["id"]])
-            return {"message": "Gmail sync started", "task_id": task.id}
-        else:
-            # Fallback to synchronous processing
-            await sync_gmail_data(current_user["id"])
-            return {"message": "Gmail sync completed"}
+        # Import Gmail tasks
+        from tasks.gmail_tasks import sync_gmail_emails
+        
+        # Use Celery for background processing
+        task = sync_gmail_emails.delay(current_user["id"], days_back)
+        
+        return {
+            "message": "Gmail sync started",
+            "task_id": task.id,
+            "days_back": days_back
+        }
         
     except Exception as e:
         logger.error(f"Failed to start Gmail sync: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to start Gmail sync"
+        )
+
+@router.get("/gmail/task-status/{task_id}")
+async def get_gmail_task_status(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check Gmail sync task status"""
+    try:
+        from celery.result import AsyncResult
+        
+        # Get task result
+        task_result = AsyncResult(task_id)
+        
+        return {
+            "task_id": task_id,
+            "status": task_result.status,
+            "result": task_result.result if task_result.ready() else None,
+            "info": task_result.info
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get task status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get task status"
         )
 
 @router.post("/hubspot/sync")
@@ -108,9 +138,9 @@ async def get_emails(
         async with AsyncSessionLocal() as session:
             result = await session.execute(
                 select(Email.id, Email.subject, Email.sender, Email.recipient, 
-                      Email.date, Email.is_read, Email.is_sent)
+                      Email.received_at, Email.is_read, Email.content)
                 .where(Email.user_id == current_user["id"])
-                .order_by(Email.date.desc())
+                .order_by(Email.received_at.desc())
                 .limit(limit)
             )
             emails = result.all()
@@ -121,9 +151,9 @@ async def get_emails(
                     "subject": email.subject,
                     "sender": email.sender,
                     "recipient": email.recipient,
-                    "date": email.date,
+                    "received_at": email.received_at,
                     "is_read": email.is_read,
-                    "is_sent": email.is_sent
+                    "content": email.content[:200] + "..." if len(email.content or "") > 200 else email.content
                 }
                 for email in emails
             ]
