@@ -132,10 +132,13 @@ def _execute_create_calendar_event(user_id: str, action_data: dict) -> dict:
             if not user.google_access_token:
                 raise Exception(f"User {user_id} has no Google access token")
             
+            if not user.google_refresh_token:
+                raise Exception("Google refresh token is missing. Please reconnect your Google account to create calendar events.")
+            
             # Initialize Gmail service with Calendar support
             if not gmail_service.initialize_service(
                 user.google_access_token,
-                user.google_refresh_token or ""
+                user.google_refresh_token
             ):
                 raise Exception("Failed to initialize Gmail/Calendar service")
             

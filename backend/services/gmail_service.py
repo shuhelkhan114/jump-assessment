@@ -29,6 +29,11 @@ class GmailService:
     def initialize_service(self, access_token: str, refresh_token: str) -> bool:
         """Initialize Gmail service with OAuth credentials"""
         try:
+            # Check if refresh token is missing
+            if not refresh_token or refresh_token.strip() == "":
+                logger.error("Google refresh token is missing or empty")
+                raise Exception("Google refresh token is missing. Please reconnect your Google account.")
+            
             # Create credentials object
             self.credentials = Credentials(
                 token=access_token,
@@ -46,7 +51,11 @@ class GmailService:
             
             # Refresh token if needed
             if self.credentials.expired:
-                self.credentials.refresh(Request())
+                try:
+                    self.credentials.refresh(Request())
+                except Exception as refresh_error:
+                    logger.error(f"Failed to refresh Google token: {str(refresh_error)}")
+                    raise Exception("Google token refresh failed. Please reconnect your Google account.")
             
             # Build Gmail and Calendar services
             self.service = build('gmail', 'v1', credentials=self.credentials)

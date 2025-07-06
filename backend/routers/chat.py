@@ -109,20 +109,29 @@ async def send_message(
                         function_args
                     )
                     
-                    # For now, wait for the task to complete (in production, you might handle this asynchronously)
-                    execution_result = task_result.get(timeout=30)
-                    tool_results.append({
-                        "tool": function_name,
-                        "status": "success",
-                        "result": execution_result
-                    })
+                    # Wait for the task to complete with shorter timeout and better error handling
+                    try:
+                        execution_result = task_result.get(timeout=10)  # Reduced timeout
+                        tool_results.append({
+                            "tool": function_name,
+                            "status": "success",
+                            "result": execution_result
+                        })
+                    except Exception as task_error:
+                        # Handle task execution errors immediately
+                        logger.error(f"Task execution error: {str(task_error)}")
+                        tool_results.append({
+                            "tool": function_name,
+                            "status": "error",
+                            "error": str(task_error)
+                        })
                     
                 except Exception as e:
-                    logger.error(f"Tool execution failed: {str(e)}")
+                    logger.error(f"Tool parsing failed: {str(e)}")
                     tool_results.append({
                         "tool": function_name,
                         "status": "error",
-                        "error": str(e)
+                        "error": f"Tool parsing error: {str(e)}"
                     })
             
             # Create follow-up conversation with tool results
