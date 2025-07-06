@@ -149,6 +149,9 @@ async def update_user_google_tokens(user_id: str, google_id: str, tokens: dict):
     if tokens.get("expires_in"):
         expires_at = datetime.utcnow() + timedelta(seconds=tokens["expires_in"])
     
+    # Debug logging
+    logger.info(f"Updating Google tokens for user {user_id} - Access token: {bool(tokens.get('access_token'))}, Refresh token: {bool(tokens.get('refresh_token'))}")
+    
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
@@ -161,9 +164,13 @@ async def update_user_google_tokens(user_id: str, google_id: str, tokens: dict):
             user.updated_at = datetime.utcnow()
             
             await session.commit()
+            logger.info(f"Successfully stored Google tokens for user {user_id}")
+        else:
+            logger.error(f"User {user_id} not found when updating Google tokens")
 
 async def refresh_google_token(user_id: str) -> Optional[str]:
     """Refresh Google access token"""
+    import httpx
     from database import AsyncSessionLocal, User, select
     
     # Get user's refresh token
@@ -172,13 +179,39 @@ async def refresh_google_token(user_id: str) -> Optional[str]:
         user = result.scalar_one_or_none()
         
         if not user or not user.google_refresh_token:
+            logger.warning(f"No refresh token found for user {user_id}")
             return None
         
         try:
-            # TODO: Implement token refresh logic
-            # This would involve calling Google's token refresh endpoint
-            # For now, return None to indicate refresh needed
-            return None
+            # Call Google's token refresh endpoint
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "client_id": settings.google_client_id,
+                        "client_secret": settings.google_client_secret,
+                        "refresh_token": user.google_refresh_token,
+                        "grant_type": "refresh_token"
+                    }
+                )
+                
+                if response.status_code == 200:
+                    token_data = response.json()
+                    new_access_token = token_data.get("access_token")
+                    
+                    # Update user's access token
+                    user.google_access_token = new_access_token
+                    if token_data.get("expires_in"):
+                        user.google_token_expires_at = datetime.utcnow() + timedelta(seconds=token_data["expires_in"])
+                    user.updated_at = datetime.utcnow()
+                    
+                    await session.commit()
+                    logger.info(f"Successfully refreshed Google token for user {user_id}")
+                    return new_access_token
+                else:
+                    logger.error(f"Failed to refresh Google token: {response.status_code} - {response.text}")
+                    return None
+                    
         except Exception as e:
             logger.error(f"Failed to refresh Google token: {str(e)}")
             return None

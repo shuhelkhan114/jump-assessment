@@ -52,6 +52,7 @@ async def google_login():
         authorization_url, _ = flow.authorization_url(
             access_type='offline',
             include_granted_scopes='true',
+            prompt='consent',  # Force consent to ensure refresh token is provided
             state=state
         )
         
@@ -91,6 +92,9 @@ async def google_callback(code: str, state: str):
             "refresh_token": credentials.refresh_token,
             "expires_in": credentials.expires_in if hasattr(credentials, 'expires_in') else 3600
         }
+        
+        # Debug logging for refresh token  
+        logger.info(f"Google OAuth callback tokens - Access token: {bool(tokens['access_token'])}, Refresh token: {bool(tokens['refresh_token'])}")
         
         user = await create_user_from_google(id_info, tokens)
         
@@ -137,6 +141,9 @@ async def google_token(auth_request: GoogleAuthRequest):
             "refresh_token": credentials.refresh_token,
             "expires_in": credentials.expires_in if hasattr(credentials, 'expires_in') else 3600
         }
+        
+        # Debug logging for refresh token
+        logger.info(f"Google OAuth tokens received - Access token: {bool(tokens['access_token'])}, Refresh token: {bool(tokens['refresh_token'])}")
         
         user = await create_user_from_google(id_info, tokens)
         

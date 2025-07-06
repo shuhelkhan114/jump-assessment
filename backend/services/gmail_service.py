@@ -52,7 +52,9 @@ class GmailService:
             # Refresh token if needed
             if self.credentials.expired:
                 try:
+                    logger.info("Google token expired, attempting refresh...")
                     self.credentials.refresh(Request())
+                    logger.info("Google token refreshed successfully")
                 except Exception as refresh_error:
                     logger.error(f"Failed to refresh Google token: {str(refresh_error)}")
                     raise Exception("Google token refresh failed. Please reconnect your Google account.")
