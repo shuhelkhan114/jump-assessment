@@ -3,9 +3,12 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import structlog
 from datetime import datetime
+import uuid
 
 from auth import get_current_user
 from database import AsyncSessionLocal, Conversation, OngoingInstruction, select
+from services.openai_service import openai_service
+from services.rag_service import rag_service
 
 logger = structlog.get_logger()
 
@@ -41,24 +44,57 @@ async def send_message(
     chat_message: ChatMessage,
     current_user: dict = Depends(get_current_user)
 ):
-    """Send a message to the AI agent"""
+    """Send a message to the AI agent with RAG context"""
     try:
-        # TODO: Implement RAG search and LLM response
-        # For now, return a placeholder response
-        response = "I'm currently being set up! I'll be able to help you with your emails and HubSpot data soon."
+        # Get RAG context for the query
+        context, sources = await rag_service.get_context_for_query(
+            chat_message.message, 
+            current_user["id"]
+        )
+        
+        # Get recent conversation history for context
+        conversation_history = await get_recent_conversation_history(current_user["id"], limit=5)
+        
+        # Get ongoing instructions
+        ongoing_instructions = await get_active_instructions(current_user["id"])
+        
+        # Build messages for OpenAI
+        messages = []
+        
+        # Add conversation history
+        for conv in reversed(conversation_history):  # Reverse to get chronological order
+            messages.append({"role": "user", "content": conv.message})
+            messages.append({"role": "assistant", "content": conv.response})
+        
+        # Add current message
+        messages.append({"role": "user", "content": chat_message.message})
+        
+        # Build system prompt
+        system_prompt = build_system_prompt(ongoing_instructions)
+        
+        # Generate response using OpenAI with RAG context
+        openai_response = await openai_service.chat_completion(
+            messages=messages,
+            system_prompt=system_prompt,
+            context=context
+        )
+        
+        response_content = openai_response.get("content", "I'm sorry, I couldn't generate a response.")
         
         # Save conversation to database
         conversation_id = await save_conversation(
             current_user["id"],
             chat_message.message,
-            response,
-            chat_message.context
+            response_content,
+            context if context else None
         )
         
+        logger.info(f"Generated chat response for user {current_user['id']} with {len(sources)} sources")
+        
         return ChatResponse(
-            response=response,
-            context_used=chat_message.context,
-            sources=[]
+            response=response_content,
+            context_used=context if context else None,
+            sources=sources
         )
         
     except Exception as e:
@@ -199,8 +235,6 @@ async def delete_ongoing_instruction(
 
 async def save_conversation(user_id: str, message: str, response: str, context: Optional[str] = None) -> str:
     """Save conversation to database"""
-    import uuid
-    
     conversation_id = str(uuid.uuid4())
     
     async with AsyncSessionLocal() as session:
@@ -216,4 +250,56 @@ async def save_conversation(user_id: str, message: str, response: str, context: 
         session.add(conversation)
         await session.commit()
     
-    return conversation_id 
+    return conversation_id
+
+async def get_recent_conversation_history(user_id: str, limit: int = 5) -> List[Conversation]:
+    """Get recent conversation history for context"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Conversation)
+            .where(Conversation.user_id == user_id)
+            .order_by(Conversation.created_at.desc())
+            .limit(limit)
+        )
+        return result.scalars().all()
+
+async def get_active_instructions(user_id: str) -> List[OngoingInstruction]:
+    """Get active ongoing instructions"""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(OngoingInstruction)
+            .where(OngoingInstruction.user_id == user_id)
+            .where(OngoingInstruction.is_active == True)
+            .order_by(OngoingInstruction.created_at.desc())
+        )
+        return result.scalars().all()
+
+def build_system_prompt(ongoing_instructions: List[OngoingInstruction]) -> str:
+    """Build system prompt for the financial advisor AI"""
+    base_prompt = """You are an intelligent AI assistant for a financial advisor. You have access to:
+
+1. Email data from Gmail (client communications, meeting requests, etc.)
+2. Contact and company data from HubSpot CRM
+3. Calendar information for scheduling
+
+Your primary responsibilities:
+- Help analyze client communications and relationships
+- Provide insights about client needs and preferences
+- Assist with scheduling and meeting coordination
+- Answer questions about client history and interactions
+- Suggest follow-up actions based on email content
+
+Guidelines:
+- Always be professional and maintain confidentiality
+- Provide specific, actionable insights when possible
+- Reference relevant emails or contact information when answering
+- If you mention specific people or companies, cite your sources
+- Be concise but thorough in your responses
+- If you don't have enough information, ask clarifying questions"""
+
+    if ongoing_instructions:
+        base_prompt += "\n\nOngoing Instructions to Remember:\n"
+        for instruction in ongoing_instructions:
+            base_prompt += f"- {instruction.instruction}\n"
+    
+    return base_prompt 

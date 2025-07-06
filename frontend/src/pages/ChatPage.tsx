@@ -98,8 +98,8 @@ export const ChatPage: React.FC = () => {
     setIsLoading(true);
 
     try {
-      // TODO: Implement API call to backend
-      const response = await fetch('/api/chat/message', {
+      // Call backend chat endpoint
+      const response = await fetch('/chat/message', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
