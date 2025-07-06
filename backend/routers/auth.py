@@ -160,8 +160,9 @@ async def google_token(auth_request: GoogleAuthRequest):
         
         user = await create_user_from_google(id_info, tokens)
         
-        # Trigger Gmail sync for Google OAuth completion
-        trigger_gmail_sync.delay(user["id"])
+        # Trigger robust initial sync for Google OAuth completion
+        from tasks.auto_sync_tasks import robust_initial_sync
+        robust_initial_sync.delay(user["id"], force_refresh=True)
         
         # Create JWT token
         access_token = create_access_token(data={"sub": user["email"]})
@@ -254,8 +255,9 @@ async def hubspot_callback(code: str, state: str):
             # Update user with HubSpot tokens
             await update_user_hubspot_tokens(user_id, tokens)
             
-            # Trigger HubSpot sync for HubSpot OAuth completion
-            trigger_hubspot_sync.delay(user_id)
+            # Trigger robust sync for HubSpot OAuth completion
+            from tasks.auto_sync_tasks import robust_trigger_sync
+            robust_trigger_sync.delay(user_id, services=["hubspot"])
         
         redirect_url = f"{settings.frontend_url}/auth/hubspot/success"
         return RedirectResponse(url=redirect_url)
@@ -293,8 +295,9 @@ async def hubspot_token(auth_request: HubSpotAuthRequest, current_user: dict = D
         # Update user with HubSpot tokens
         await update_user_hubspot_tokens(current_user["id"], tokens)
         
-        # Trigger HubSpot sync for HubSpot OAuth completion
-        trigger_hubspot_sync.delay(current_user["id"])
+        # Trigger robust sync for HubSpot OAuth completion
+        from tasks.auto_sync_tasks import robust_trigger_sync
+        robust_trigger_sync.delay(current_user["id"], services=["hubspot"])
         
         return {"message": "HubSpot authentication successful"}
         
@@ -319,6 +322,20 @@ async def auth_status(current_user: dict = Depends(get_current_user)):
             "hubspot": bool(current_user.get("hubspot_access_token"))
         }
     }
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(current_user: dict = Depends(get_current_user)):
+    """Refresh JWT access token"""
+    try:
+        # Create a new JWT token for the authenticated user
+        access_token = create_access_token(data={"sub": current_user["email"]})
+        return {"access_token": access_token, "token_type": "bearer"}
+    except Exception as e:
+        logger.error(f"Token refresh failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to refresh token"
+        )
 
 @router.post("/logout")
 async def logout(current_user: dict = Depends(get_current_user)):

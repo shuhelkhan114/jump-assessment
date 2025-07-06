@@ -491,5 +491,106 @@ class GmailService:
             logger.error(f"Failed to create calendar event: {str(e)}")
             raise e
 
+    async def list_calendar_events(
+        self, 
+        days_forward: int = 30,
+        max_results: int = 100
+    ) -> List[Dict[str, Any]]:
+        """List upcoming calendar events from Google Calendar"""
+        try:
+            if not self.calendar_service:
+                raise Exception("Calendar service not initialized")
+            
+            # Calculate time range
+            now = datetime.now(timezone.utc)
+            end_time = now + timedelta(days=days_forward)
+            
+            # Format times for Google Calendar API
+            time_min = now.isoformat()
+            time_max = end_time.isoformat()
+            
+            logger.info(f"Fetching calendar events from {time_min} to {time_max}")
+            
+            # Get events from primary calendar
+            result = self.calendar_service.events().list(
+                calendarId='primary',
+                timeMin=time_min,
+                timeMax=time_max,
+                maxResults=max_results,
+                singleEvents=True,
+                orderBy='startTime'
+            ).execute()
+            
+            events = result.get('items', [])
+            logger.info(f"Retrieved {len(events)} calendar events")
+            
+            # Process events
+            processed_events = []
+            for event in events:
+                # Handle different event types (all-day vs timed)
+                start = event.get('start', {})
+                end = event.get('end', {})
+                
+                # Check if it's an all-day event
+                is_all_day = 'date' in start
+                
+                if is_all_day:
+                    start_datetime = None
+                    end_datetime = None
+                    start_date = start.get('date')
+                    end_date = end.get('date')
+                else:
+                    start_datetime_str = start.get('dateTime')
+                    end_datetime_str = end.get('dateTime')
+                    
+                    # Parse datetime strings
+                    start_datetime = datetime.fromisoformat(start_datetime_str.replace('Z', '+00:00')) if start_datetime_str else None
+                    end_datetime = datetime.fromisoformat(end_datetime_str.replace('Z', '+00:00')) if end_datetime_str else None
+                    start_date = None
+                    end_date = None
+                
+                # Extract organizer info
+                organizer = event.get('organizer', {})
+                organizer_email = organizer.get('email', '')
+                organizer_name = organizer.get('displayName', organizer_email)
+                
+                # Extract attendees
+                attendees_list = event.get('attendees', [])
+                attendees_data = [
+                    {
+                        'email': attendee.get('email', ''),
+                        'displayName': attendee.get('displayName', ''),
+                        'responseStatus': attendee.get('responseStatus', 'needsAction')
+                    }
+                    for attendee in attendees_list
+                ]
+                
+                processed_event = {
+                    'google_event_id': event.get('id'),
+                    'title': event.get('summary', 'No Title'),
+                    'description': event.get('description', ''),
+                    'location': event.get('location', ''),
+                    'start_datetime': start_datetime,
+                    'end_datetime': end_datetime,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'is_all_day': is_all_day,
+                    'status': event.get('status', 'confirmed'),
+                    'organizer_email': organizer_email,
+                    'organizer_name': organizer_name,
+                    'attendees': attendees_data,
+                    'html_link': event.get('htmlLink', ''),
+                    'created': event.get('created'),
+                    'updated': event.get('updated')
+                }
+                
+                processed_events.append(processed_event)
+            
+            return processed_events
+            
+        except Exception as e:
+            logger.error(f"Failed to list calendar events: {str(e)}")
+            raise e
+
 # Global service instance
 gmail_service = GmailService() 

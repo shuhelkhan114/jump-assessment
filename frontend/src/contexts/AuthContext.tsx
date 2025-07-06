@@ -10,6 +10,7 @@ interface AuthContextType {
   updateUser: (user: User) => void;
   authStatus: AuthStatus | null;
   setAuthStatus: (status: AuthStatus) => void;
+  apiCall: (url: string, options?: RequestInit) => Promise<Response>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -98,6 +99,55 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     setUser(userData);
   };
 
+  const apiCall = async (url: string, options: RequestInit = {}): Promise<Response> => {
+    const baseUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+    const fullUrl = url.startsWith('http') ? url : `${baseUrl}${url}`;
+    
+    const token = localStorage.getItem('token');
+    if (token) {
+      options.headers = {
+        ...options.headers,
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      };
+    }
+
+    let response = await fetch(fullUrl, options);
+
+    // If we get a 401 and have a token, try to refresh it
+    if (response.status === 401 && token) {
+      try {
+        const refreshResponse = await fetch(`${baseUrl}/auth/refresh`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (refreshResponse.ok) {
+          const { access_token } = await refreshResponse.json();
+          localStorage.setItem('token', access_token);
+          
+          // Retry the original request with the new token
+          options.headers = {
+            ...options.headers,
+            'Authorization': `Bearer ${access_token}`,
+          };
+          response = await fetch(fullUrl, options);
+        } else {
+          // Refresh failed, logout user
+          logout();
+        }
+      } catch (error) {
+        console.error('Token refresh failed:', error);
+        logout();
+      }
+    }
+
+    return response;
+  };
+
   const value: AuthContextType = {
     user,
     isAuthenticated: !!user,
@@ -107,6 +157,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     updateUser,
     authStatus,
     setAuthStatus,
+    apiCall,
   };
 
   return (

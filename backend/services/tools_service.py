@@ -98,6 +98,29 @@ class ToolsService:
             {
                 "type": "function",
                 "function": {
+                    "name": "get_calendar_schedule",
+                    "description": "Get the user's calendar schedule and upcoming events. Use this when the user asks about their schedule, calendar, appointments, or what they have planned.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "days_forward": {
+                                "type": "integer",
+                                "description": "Number of days forward to look for events (default: 7)",
+                                "default": 7
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Maximum number of events to return (default: 20)",
+                                "default": 20
+                            }
+                        },
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "create_hubspot_contact",
                     "description": "Create a new contact in HubSpot CRM. Use this when the user wants to add a new person to their contacts or CRM.",
                     "parameters": {

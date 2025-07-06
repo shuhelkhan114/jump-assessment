@@ -53,6 +53,8 @@ def execute_ai_action(self, user_id: str, action_type: str, action_data: dict):
             return _execute_send_email(user_id, action_data)
         elif action_type == "create_calendar_event":
             return _execute_create_calendar_event(user_id, action_data)
+        elif action_type == "get_calendar_schedule":
+            return _execute_get_calendar_schedule(user_id, action_data)
         elif action_type == "create_hubspot_contact":
             return _execute_create_hubspot_contact(user_id, action_data)
         else:
@@ -310,6 +312,119 @@ def _execute_create_hubspot_contact(user_id: str, action_data: dict) -> dict:
         
     except Exception as e:
         logger.error(f"Failed to create HubSpot contact: {str(e)}")
+        raise e
+
+def _execute_get_calendar_schedule(user_id: str, action_data: dict) -> dict:
+    """Execute get calendar schedule action"""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+    from database import User, CalendarEvent
+    from config import get_settings
+    import json
+    from datetime import datetime, timezone, timedelta
+    
+    logger.info(f"Getting calendar schedule for user {user_id}: {action_data}")
+    
+    try:
+        # Extract parameters
+        days_forward = action_data.get("days_forward", 7)
+        max_results = action_data.get("max_results", 20)
+        
+        # Get user and calendar events from database (synchronous database access for Celery)
+        settings = get_settings()
+        sync_engine = create_engine(settings.database_url, echo=False)
+        SyncSessionLocal = sessionmaker(bind=sync_engine)
+        
+        with SyncSessionLocal() as session:
+            user_result = session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = user_result.scalar_one_or_none()
+            
+            if not user:
+                raise Exception(f"User {user_id} not found")
+            
+            # Calculate date range
+            now = datetime.now(timezone.utc)
+            end_date = now + timedelta(days=days_forward)
+            
+            # Query calendar events within the date range
+            events_result = session.execute(
+                select(CalendarEvent).where(
+                    CalendarEvent.user_id == user_id,
+                    (CalendarEvent.start_datetime >= now) | (CalendarEvent.start_date >= now.date().isoformat())
+                ).order_by(CalendarEvent.start_datetime.asc(), CalendarEvent.start_date.asc()).limit(max_results)
+            )
+            events = events_result.scalars().all()
+            
+            # Format events for response with deduplication
+            formatted_events = []
+            seen_events = set()  # Track unique events to prevent duplicates
+            
+            for event in events:
+                # Create unique identifier for deduplication
+                event_key = (event.title, event.start_datetime or event.start_date, event.organizer_email)
+                if event_key in seen_events:
+                    continue  # Skip duplicate
+                seen_events.add(event_key)
+                
+                # Format datetime for display
+                if event.start_datetime:
+                    start_display = event.start_datetime.strftime("%A, %B %d, %Y at %I:%M %p")
+                    end_display = event.end_datetime.strftime("%I:%M %p") if event.end_datetime else "End time not specified"
+                    time_info = f"{start_display} - {end_display}"
+                elif event.start_date:
+                    start_display = f"{event.start_date} (all day)"
+                    time_info = start_display
+                else:
+                    time_info = "Date not specified"
+                
+                # Parse attendees JSON if available
+                attendees_list = []
+                if event.attendees:
+                    try:
+                        attendees_data = json.loads(event.attendees)
+                        attendees_list = [
+                            att.get('displayName', att.get('email', ''))
+                            for att in attendees_data 
+                            if att.get('displayName') or att.get('email')
+                        ]
+                    except:
+                        pass
+                
+                formatted_event = {
+                    "title": event.title,
+                    "time": time_info,
+                    "location": event.location or "",
+                    "description": event.description or "",
+                    "organizer": event.organizer_name or event.organizer_email or "",
+                    "attendees": attendees_list,
+                    "status": event.status or "confirmed"
+                }
+                formatted_events.append(formatted_event)
+            
+            # Generate summary message
+            if formatted_events:
+                summary_msg = f"Found {len(formatted_events)} upcoming events in the next {days_forward} days"
+            else:
+                summary_msg = f"No upcoming events found in the next {days_forward} days"
+            
+            logger.info(f"Retrieved {len(formatted_events)} calendar events for user {user_id}")
+            
+            return {
+                "action": "get_calendar_schedule",
+                "status": "success",
+                "message": summary_msg,
+                "details": {
+                    "events": formatted_events,
+                    "total_events": len(formatted_events),
+                    "days_forward": days_forward,
+                    "date_range": f"{now.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}"
+                }
+            }
+        
+    except Exception as e:
+        logger.error(f"Failed to get calendar schedule: {str(e)}")
         raise e
 
 @celery_app.task(bind=True)

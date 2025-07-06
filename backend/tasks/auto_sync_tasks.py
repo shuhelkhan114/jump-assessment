@@ -10,6 +10,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from tasks.gmail_tasks import sync_gmail_emails, sync_all_users_gmail
 from tasks.hubspot_tasks import sync_hubspot_contacts, sync_hubspot_deals, sync_hubspot_companies, sync_all_users_hubspot
+from tasks.calendar_tasks import sync_calendar_events
+from services.sync_manager import sync_manager
 from database import User
 from config import get_settings
 from google.auth.transport.requests import Request
@@ -65,11 +67,12 @@ def auto_sync_all_users(self):
             # Queue sync tasks for each user
             for user in users:
                 try:
-                    # Sync Gmail if user has Google token
+                    # Sync Gmail and Calendar if user has Google token
                     if user.google_access_token:
                         gmail_result = sync_gmail_emails.delay(user.id, days_back=7)
+                        calendar_result = sync_calendar_events.delay(user.id, days_forward=30)
                         gmail_synced += 1
-                        logger.info(f"📧 Gmail sync queued for user {user.id}")
+                        logger.info(f"📧 Gmail and 📅 Calendar sync queued for user {user.id}")
                     
                     # Sync HubSpot if user has HubSpot token
                     if user.hubspot_access_token:
@@ -146,13 +149,16 @@ def initial_gmail_sync(self, user_id: str):
     try:
         logger.info(f"📧 Starting initial Gmail sync for user {user_id}")
         
-        # Queue Gmail sync task with shorter time period to get latest emails first
+        # Queue Gmail and Calendar sync tasks
         gmail_result = sync_gmail_emails.delay(user_id, days_back=7)  # Start with 7 days
+        calendar_result = sync_calendar_events.delay(user_id, days_forward=30)  # Next 30 days
         
         result = {
             "user_id": user_id,
             "gmail_synced": True,
-            "task_id": gmail_result.id
+            "calendar_synced": True,
+            "gmail_task_id": gmail_result.id,
+            "calendar_task_id": calendar_result.id
         }
         
         logger.info(f"✅ Initial Gmail sync completed for user {user_id}: {result}")
@@ -332,5 +338,220 @@ def refresh_expiring_tokens(self):
     except Exception as e:
         logger.error(f"Proactive token refresh failed: {str(e)}")
         raise self.retry(exc=e, countdown=300, max_retries=3)
+
+@celery_app.task(bind=True)
+def robust_sync_all_users(self):
+    """
+    Robust periodic task using the unified sync manager
+    Replaces auto_sync_all_users with better error handling and token management
+    """
+    try:
+        logger.info("🔄 Starting robust auto-sync for all users")
+        
+        # Get all users who have connected their accounts
+        with SyncSessionLocal() as session:
+            result = session.execute(
+                select(User).where(
+                    (User.google_access_token.is_not(None)) |
+                    (User.hubspot_access_token.is_not(None))
+                )
+            )
+            users = result.scalars().all()
+            
+            if not users:
+                logger.info("No users with connected accounts found")
+                return {"users_processed": 0, "errors": []}
+            
+            logger.info(f"Found {len(users)} users with connected accounts")
+            
+            results = {
+                "users_processed": len(users),
+                "successful_users": 0,
+                "failed_users": 0,
+                "sync_results": {},
+                "errors": []
+            }
+            
+            # Process each user with the sync manager
+            for user in users:
+                try:
+                    # Use the sync manager for robust sync
+                    user_results = asyncio.run(sync_manager.sync_all_data(user.id))
+                    
+                    # Check if sync was successful
+                    success_count = sum(1 for r in user_results.values() 
+                                      if hasattr(r, 'status') and r.status.value == "success")
+                    total_count = len(user_results)
+                    
+                    if success_count > 0:
+                        results["successful_users"] += 1
+                        logger.info(f"✅ User {user.id}: {success_count}/{total_count} services synced")
+                    else:
+                        results["failed_users"] += 1
+                        logger.warning(f"⚠️ User {user.id}: no services synced successfully")
+                    
+                    # Store results for detailed reporting
+                    results["sync_results"][user.id] = {
+                        "success_count": success_count,
+                        "total_count": total_count,
+                        "services": {
+                            service: {
+                                "status": r.status.value if hasattr(r, 'status') else str(r),
+                                "message": r.message if hasattr(r, 'message') else str(r)
+                            }
+                            for service, r in user_results.items()
+                        }
+                    }
+                    
+                except Exception as user_error:
+                    results["failed_users"] += 1
+                    error_msg = f"Failed to sync user {user.id}: {str(user_error)}"
+                    results["errors"].append(error_msg)
+                    logger.error(error_msg)
+            
+            logger.info(f"✅ Robust auto-sync completed: {results['successful_users']} successful, {results['failed_users']} failed")
+            return results
+        
+    except Exception as exc:
+        logger.error(f"❌ Robust auto-sync failed: {str(exc)}")
+        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+
+
+@celery_app.task(bind=True, max_retries=3)
+def robust_initial_sync(self, user_id: str, force_refresh: bool = False):
+    """
+    Robust initial sync using the unified sync manager
+    """
+    try:
+        logger.info(f"🚀 Starting robust initial sync for user {user_id}")
+        
+        # Use the sync manager for comprehensive sync
+        sync_results = asyncio.run(sync_manager.sync_all_data(user_id, force_refresh=force_refresh))
+        
+        # Process results
+        successful_services = []
+        failed_services = []
+        
+        for service, result in sync_results.items():
+            if hasattr(result, 'status'):
+                if result.status.value == "success":
+                    successful_services.append(service)
+                else:
+                    failed_services.append(f"{service}: {result.message}")
+            else:
+                failed_services.append(f"{service}: {str(result)}")
+        
+        overall_success = len(successful_services) > len(failed_services)
+        
+        result_data = {
+            "user_id": user_id,
+            "overall_success": overall_success,
+            "successful_services": successful_services,
+            "failed_services": failed_services,
+            "sync_results": {
+                service: {
+                    "status": r.status.value if hasattr(r, 'status') else str(r),
+                    "message": r.message if hasattr(r, 'message') else str(r)
+                }
+                for service, r in sync_results.items()
+            }
+        }
+        
+        if overall_success:
+            logger.info(f"✅ Robust initial sync completed for user {user_id}: {len(successful_services)} services synced")
+        else:
+            logger.warning(f"⚠️ Robust initial sync partially failed for user {user_id}: {len(failed_services)} services failed")
+        
+        return result_data
+        
+    except Exception as exc:
+        logger.error(f"❌ Robust initial sync failed for user {user_id}: {str(exc)}")
+        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+
+
+@celery_app.task
+def robust_trigger_sync(user_id: str, services: list = None):
+    """
+    Robust sync trigger that can sync all or specific services
+    """
+    try:
+        logger.info(f"🔄 Triggering robust sync for user {user_id}, services: {services}")
+        
+        if services:
+            # Sync specific services
+            results = {}
+            for service in services:
+                result = asyncio.run(sync_manager.sync_single_service(user_id, service))
+                results[service] = {
+                    "status": result.status.value,
+                    "message": result.message
+                }
+        else:
+            # Sync all services
+            sync_results = asyncio.run(sync_manager.sync_all_data(user_id))
+            results = {
+                service: {
+                    "status": r.status.value if hasattr(r, 'status') else str(r),
+                    "message": r.message if hasattr(r, 'message') else str(r)
+                }
+                for service, r in sync_results.items()
+            }
+        
+        logger.info(f"✅ Robust sync completed for user {user_id}")
+        return {"sync_triggered": True, "results": results}
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to trigger robust sync for user {user_id}: {str(e)}")
+        return {"error": str(e)}
+
+
+@celery_app.task
+def health_check_all_users():
+    """
+    Health check for all users' integrations
+    """
+    try:
+        logger.info("🏥 Running health check for all users")
+        
+        with SyncSessionLocal() as session:
+            result = session.execute(
+                select(User).where(
+                    (User.google_access_token.is_not(None)) |
+                    (User.hubspot_access_token.is_not(None))
+                )
+            )
+            users = result.scalars().all()
+            
+            health_results = {}
+            healthy_users = 0
+            degraded_users = 0
+            
+            for user in users:
+                try:
+                    health_status = asyncio.run(sync_manager.health_check(user.id))
+                    health_results[user.id] = health_status
+                    
+                    if health_status.get("overall_status") == "healthy":
+                        healthy_users += 1
+                    else:
+                        degraded_users += 1
+                        
+                except Exception as e:
+                    health_results[user.id] = {"status": "error", "message": str(e)}
+                    degraded_users += 1
+            
+            summary = {
+                "total_users": len(users),
+                "healthy_users": healthy_users,
+                "degraded_users": degraded_users,
+                "health_results": health_results
+            }
+            
+            logger.info(f"🏥 Health check completed: {healthy_users} healthy, {degraded_users} degraded")
+            return summary
+            
+    except Exception as e:
+        logger.error(f"❌ Health check failed: {str(e)}")
+        return {"error": str(e)}
 
  

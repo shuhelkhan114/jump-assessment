@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { ChatResponse, ConversationHistory, ToolResult } from '../types/api';
+import SyncStatusPanel from '../components/SyncStatusPanel';
 
 // Enhanced message type to include tool results
 interface ChatMessage {
@@ -167,6 +168,42 @@ export const ChatPage: React.FC = () => {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
+
+  // App load sync trigger - Check health and potentially trigger sync
+  useEffect(() => {
+    const triggerAppLoadSync = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        if (!token) return;
+
+        // Check if user has any integrations that need initial sync
+        const statusResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/integrations/status`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+
+        if (statusResponse.ok) {
+          const integrationStatus = await statusResponse.json();
+          
+          // If user has integrations but we haven't checked health recently, do a health check
+          if (integrationStatus.google || integrationStatus.hubspot) {
+            // Perform health check to refresh tokens if needed
+            await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/integrations/health-check`, {
+              headers: {
+                'Authorization': `Bearer ${token}`
+              }
+            });
+          }
+        }
+      } catch (error) {
+        console.log('App load sync check failed (non-critical):', error);
+      }
+    };
+
+    // Trigger on app load
+    triggerAppLoadSync();
+  }, []); // Only run once on mount
 
   // Load session from URL parameters
   useEffect(() => {
@@ -336,6 +373,11 @@ export const ChatPage: React.FC = () => {
             <div className="flex items-center space-x-3">
               <HubSpotIntegration />
             </div>
+          </div>
+          
+          {/* Sync Status Panel */}
+          <div className="mt-4">
+            <SyncStatusPanel />
           </div>
         </div>
 

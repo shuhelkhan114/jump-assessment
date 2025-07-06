@@ -35,6 +35,35 @@ class HubSpotSummary(BaseModel):
     total_contacts: int
     last_sync: Optional[datetime] = None
 
+class RobustSyncResult(BaseModel):
+    user_id: str
+    overall_success: bool
+    successful_services: List[str]
+    failed_services: List[str]
+    sync_results: Dict[str, Dict[str, str]]
+
+class HealthCheckResult(BaseModel):
+    user_id: str
+    timestamp: str
+    overall_status: str
+    services: Dict[str, Dict[str, str]]
+
+class SystemStatusResult(BaseModel):
+    timestamp: str
+    uptime_seconds: float
+    uptime_human: str
+    performance_metrics: Dict[str, Any]
+    cache_stats: Dict[str, Any]
+    database_stats: Dict[str, Any]
+    system_health: str
+
+class PerformanceRecommendations(BaseModel):
+    timestamp: str
+    recommendations: List[str]
+    system_health: str
+    critical_issues: int
+    total_operations: int
+
 @router.get("/sync-status")
 async def get_sync_status(current_user: dict = Depends(get_current_user)):
     """Get sync status for all integrations"""
@@ -537,22 +566,36 @@ async def manual_sync(current_user: dict = Depends(get_current_user)):
     try:
         sync_results = []
         
-        # Check if user has Google OAuth and sync Gmail
+        # Check if user has Google OAuth and sync Gmail & Calendar
         if current_user.get("google_access_token"):
             try:
                 from tasks.gmail_tasks import sync_gmail_emails
+                from tasks.calendar_tasks import sync_calendar_events
+                
                 gmail_task = sync_gmail_emails.delay(current_user["id"], days_back=7)
+                calendar_task = sync_calendar_events.delay(current_user["id"], days_forward=30)
+                
                 sync_results.append({
                     "service": "gmail",
                     "status": "started",
                     "task_id": gmail_task.id
                 })
-                logger.info(f"Manual Gmail sync started for user {current_user['id']}")
+                sync_results.append({
+                    "service": "calendar", 
+                    "status": "started",
+                    "task_id": calendar_task.id
+                })
+                logger.info(f"Manual Gmail and Calendar sync started for user {current_user['id']}")
             except Exception as e:
-                logger.error(f"Failed to start Gmail sync: {str(e)}")
+                logger.error(f"Failed to start Gmail/Calendar sync: {str(e)}")
                 sync_results.append({
                     "service": "gmail",
                     "status": "error",
+                    "error": str(e)
+                })
+                sync_results.append({
+                    "service": "calendar",
+                    "status": "error", 
                     "error": str(e)
                 })
         
@@ -591,4 +634,484 @@ async def manual_sync(current_user: dict = Depends(get_current_user)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to start manual sync"
-        ) 
+        )
+
+# ROBUST SYNC ENDPOINTS using the Unified Sync Manager
+
+@router.post("/robust-sync")
+async def robust_manual_sync(
+    force_refresh: bool = False,
+    services: Optional[List[str]] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Robust manual sync using the unified sync manager with proactive token refresh
+    """
+    try:
+        from tasks.auto_sync_tasks import robust_trigger_sync
+        
+        # Trigger robust sync with optional service filtering
+        task = robust_trigger_sync.delay(current_user["id"], services)
+        
+        return {
+            "message": "Robust sync started",
+            "task_id": task.id,
+            "force_refresh": force_refresh,
+            "services": services or "all"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to start robust sync: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start robust sync: {str(e)}"
+        )
+
+@router.get("/robust-sync/task-status/{task_id}")
+async def get_robust_sync_status(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get robust sync task status with detailed results"""
+    try:
+        from celery.result import AsyncResult
+        
+        task_result = AsyncResult(task_id)
+        
+        response = {
+            "task_id": task_id,
+            "status": task_result.status,
+            "ready": task_result.ready(),
+        }
+        
+        if task_result.ready():
+            result = task_result.result
+            if isinstance(result, dict) and "results" in result:
+                response["sync_results"] = result["results"]
+                response["sync_triggered"] = result.get("sync_triggered", False)
+            else:
+                response["result"] = result
+        else:
+            response["info"] = task_result.info
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Failed to get robust sync status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get robust sync status"
+        )
+
+@router.get("/health-check", response_model=HealthCheckResult)
+async def integration_health_check(current_user: dict = Depends(get_current_user)):
+    """
+    Comprehensive health check for all integrations with token validation
+    """
+    try:
+        from services.sync_manager import sync_manager
+        
+        # Run health check using sync manager
+        health_status = await sync_manager.health_check(current_user["id"])
+        
+        return HealthCheckResult(
+            user_id=health_status["user_id"],
+            timestamp=health_status["timestamp"],
+            overall_status=health_status["overall_status"],
+            services=health_status["services"]
+        )
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Health check failed: {str(e)}"
+        )
+
+@router.post("/initial-sync")
+async def robust_initial_sync(
+    force_refresh: bool = True,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Robust initial sync for new user integrations
+    """
+    try:
+        from tasks.auto_sync_tasks import robust_initial_sync
+        
+        # Trigger robust initial sync
+        task = robust_initial_sync.delay(current_user["id"], force_refresh)
+        
+        return {
+            "message": "Robust initial sync started",
+            "task_id": task.id,
+            "force_refresh": force_refresh
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to start robust initial sync: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start robust initial sync: {str(e)}"
+        )
+
+@router.get("/initial-sync/task-status/{task_id}")
+async def get_initial_sync_status(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get initial sync task status with detailed results"""
+    try:
+        from celery.result import AsyncResult
+        
+        task_result = AsyncResult(task_id)
+        
+        response = {
+            "task_id": task_id,
+            "status": task_result.status,
+            "ready": task_result.ready(),
+        }
+        
+        if task_result.ready():
+            result = task_result.result
+            if isinstance(result, dict):
+                response.update({
+                    "overall_success": result.get("overall_success", False),
+                    "successful_services": result.get("successful_services", []),
+                    "failed_services": result.get("failed_services", []),
+                    "sync_results": result.get("sync_results", {})
+                })
+            else:
+                response["result"] = result
+        else:
+            response["info"] = task_result.info
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Failed to get initial sync status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get initial sync status"
+        )
+
+@router.post("/refresh-tokens")
+async def refresh_all_tokens(current_user: dict = Depends(get_current_user)):
+    """
+    Force refresh all tokens for the user
+    """
+    try:
+        from services.token_manager import token_manager
+        
+        # Refresh all tokens
+        results = await token_manager.ensure_valid_tokens(current_user["id"])
+        
+        return {
+            "message": "Token refresh completed",
+            "results": results,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to refresh tokens: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to refresh tokens: {str(e)}"
+        )
+
+@router.get("/sync-manager-status")
+async def get_sync_manager_status(current_user: dict = Depends(get_current_user)):
+    """
+    Get detailed status from the sync manager
+    """
+    try:
+        from services.sync_manager import sync_manager
+        
+        # Get last sync status
+        status = await sync_manager.get_last_sync_status(current_user["id"])
+        
+        return status
+        
+    except Exception as e:
+        logger.error(f"Failed to get sync manager status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get sync manager status: {str(e)}"
+        )
+
+# MONITORING AND SYSTEM STATUS ENDPOINTS
+
+@router.get("/system-status")
+async def get_system_status(current_user: dict = Depends(get_current_user)):
+    """
+    Get comprehensive system status including performance metrics, cache stats, and database health
+    """
+    try:
+        status = await performance_monitor.get_system_status()
+        return SystemStatusResult(**status)
+    except Exception as e:
+        logger.error(f"Failed to get system status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get system status: {str(e)}")
+
+@router.get("/performance-metrics")
+async def get_performance_metrics(current_user: dict = Depends(get_current_user)):
+    """
+    Get detailed performance metrics for all operations
+    """
+    try:
+        metrics = performance_monitor.metrics.get_metrics_summary()
+        return metrics
+    except Exception as e:
+        logger.error(f"Failed to get performance metrics: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get performance metrics: {str(e)}")
+
+@router.get("/performance-recommendations")
+async def get_performance_recommendations(current_user: dict = Depends(get_current_user)):
+    """
+    Get performance improvement recommendations based on current metrics
+    """
+    try:
+        recommendations = await performance_monitor.get_performance_recommendations()
+        metrics = performance_monitor.metrics.get_metrics_summary()
+        
+        # Count critical issues
+        critical_issues = sum(
+            1 for op_metrics in metrics['operations'].values()
+            if op_metrics['success_rate'] < 90 or op_metrics['avg_time_ms'] > 3000
+        )
+        
+        total_operations = sum(
+            op_metrics['count'] for op_metrics in metrics['operations'].values()
+        )
+        
+        return PerformanceRecommendations(
+            timestamp=datetime.utcnow().isoformat(),
+            recommendations=recommendations,
+            system_health=metrics['system_health'],
+            critical_issues=critical_issues,
+            total_operations=total_operations
+        )
+    except Exception as e:
+        logger.error(f"Failed to get performance recommendations: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get recommendations: {str(e)}")
+
+@router.post("/cleanup-cache")
+async def cleanup_cache(current_user: dict = Depends(get_current_user)):
+    """
+    Manually trigger cache cleanup and optimization
+    """
+    try:
+        # Get stats before cleanup
+        before_stats = performance_monitor.cache.get_stats()
+        
+        # Perform cleanup
+        performance_monitor.cleanup()
+        
+        # Get stats after cleanup
+        after_stats = performance_monitor.cache.get_stats()
+        
+        return {
+            "message": "Cache cleanup completed",
+            "before": before_stats,
+            "after": after_stats,
+            "items_cleaned": before_stats['cached_items'] - after_stats['cached_items']
+        }
+    except Exception as e:
+        logger.error(f"Failed to cleanup cache: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup cache: {str(e)}")
+
+@router.get("/service-diagnostics/{service}")
+async def get_service_diagnostics(
+    service: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get detailed diagnostics for a specific service
+    """
+    try:
+        user_id = current_user["id"]
+        
+        if service not in ["gmail", "hubspot", "calendar"]:
+            raise HTTPException(status_code=400, detail="Invalid service. Must be gmail, hubspot, or calendar")
+        
+        # Import service diagnostics
+        from services.service_diagnostics import service_diagnostics
+        
+        if service == "gmail":
+            issues = await service_diagnostics.diagnose_gmail_error("", user_id)
+        elif service == "hubspot":
+            issues = await service_diagnostics.diagnose_hubspot_error("", user_id)
+        elif service == "calendar":
+            issues = await service_diagnostics.diagnose_calendar_error("", user_id)
+        
+        # Get service recommendations
+        recommendations = await service_diagnostics.get_service_recommendations(user_id)
+        
+        return {
+            "service": service,
+            "user_id": user_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "issues": service_diagnostics.format_issues_for_ui(issues),
+            "recommendations": recommendations.get(service, []),
+            "total_issues": len(issues)
+        }
+    except Exception as e:
+        logger.error(f"Failed to get {service} diagnostics: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get {service} diagnostics: {str(e)}")
+
+@router.get("/user-sync-history")
+async def get_user_sync_history(current_user: dict = Depends(get_current_user)):
+    """
+    Get sync history and statistics for the current user
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Get sync stats from performance monitor
+        sync_stats = performance_monitor.metrics.sync_stats.get(user_id, {})
+        
+        # Get general user info
+        user_info = await sync_manager._get_user_integrations(user_id)
+        
+        return {
+            "user_id": user_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "integrations": user_info,
+            "sync_statistics": {
+                "gmail_syncs": sync_stats.get("gmail_syncs", 0),
+                "calendar_syncs": sync_stats.get("calendar_syncs", 0),
+                "hubspot_syncs": sync_stats.get("hubspot_syncs", 0),
+                "total_syncs": sync_stats.get("total_syncs", 0),
+                "failed_syncs": sync_stats.get("failed_syncs", 0),
+                "success_rate": round(
+                    ((sync_stats.get("total_syncs", 0) - sync_stats.get("failed_syncs", 0)) / 
+                     max(sync_stats.get("total_syncs", 1), 1)) * 100, 2
+                ),
+                "avg_sync_time_seconds": round(sync_stats.get("avg_sync_time", 0), 2),
+                "last_sync": sync_stats.get("last_sync")
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get user sync history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get sync history: {str(e)}")
+
+@router.get("/system-summary")
+async def get_system_summary(current_user: dict = Depends(get_current_user)):
+    """
+    Get a comprehensive system summary for dashboard display
+    """
+    try:
+        user_id = current_user["id"]
+        
+        # Get health check
+        health_check = await sync_manager.health_check(user_id)
+        
+        # Get performance metrics
+        performance_metrics = performance_monitor.metrics.get_metrics_summary()
+        
+        # Get cache stats
+        cache_stats = performance_monitor.cache.get_stats()
+        
+        # Get sync statistics
+        sync_stats = performance_monitor.metrics.sync_stats.get(user_id, {})
+        
+        # Get database stats
+        db_stats = await performance_monitor.get_database_stats()
+        
+        # Get recommendations
+        recommendations = await performance_monitor.get_performance_recommendations()
+        
+        # Calculate overall system score (0-100)
+        score_factors = []
+        
+        # Health factor (40% weight)
+        if health_check["overall_status"] == "healthy":
+            health_score = 100
+        elif health_check["overall_status"] == "warning":
+            health_score = 70
+        elif health_check["overall_status"] == "degraded":
+            health_score = 40
+        else:
+            health_score = 10
+        
+        score_factors.append(("health", health_score, 0.4))
+        
+        # Performance factor (30% weight)
+        if performance_metrics["system_health"] == "healthy":
+            perf_score = 100
+        elif performance_metrics["system_health"] == "warning":
+            perf_score = 70
+        else:
+            perf_score = 30
+        
+        score_factors.append(("performance", perf_score, 0.3))
+        
+        # Cache efficiency factor (20% weight)
+        cache_score = min(100, cache_stats["hit_rate"] + 20)  # Bonus for having cache
+        score_factors.append(("cache", cache_score, 0.2))
+        
+        # Sync success factor (10% weight)
+        total_syncs = sync_stats.get("total_syncs", 0)
+        failed_syncs = sync_stats.get("failed_syncs", 0)
+        if total_syncs > 0:
+            sync_success_rate = ((total_syncs - failed_syncs) / total_syncs) * 100
+        else:
+            sync_success_rate = 100  # No syncs yet, assume healthy
+        
+        score_factors.append(("sync", sync_success_rate, 0.1))
+        
+        # Calculate weighted score
+        overall_score = sum(score * weight for _, score, weight in score_factors)
+        overall_score = max(0, min(100, round(overall_score)))
+        
+        # Determine status emoji and message
+        if overall_score >= 90:
+            status_emoji = "🟢"
+            status_message = "Excellent"
+        elif overall_score >= 75:
+            status_emoji = "🟡"
+            status_message = "Good"
+        elif overall_score >= 50:
+            status_emoji = "🟠"
+            status_message = "Needs Attention"
+        else:
+            status_emoji = "🔴"
+            status_message = "Critical Issues"
+        
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "user_id": user_id,
+            "overall_score": overall_score,
+            "status_emoji": status_emoji,
+            "status_message": status_message,
+            "health_check": health_check,
+            "performance": {
+                "system_health": performance_metrics["system_health"],
+                "operations_count": sum(op["count"] for op in performance_metrics["operations"].values()),
+                "avg_response_time": sum(op["avg_time_ms"] for op in performance_metrics["operations"].values()) / 
+                                   max(len(performance_metrics["operations"]), 1),
+                "cache_hit_rate": cache_stats["hit_rate"]
+            },
+            "sync_stats": {
+                "total_syncs": sync_stats.get("total_syncs", 0),
+                "success_rate": round(sync_success_rate, 1),
+                "last_sync": sync_stats.get("last_sync"),
+                "avg_sync_time": round(sync_stats.get("avg_sync_time", 0), 2)
+            },
+            "database": {
+                "total_users": db_stats.get("user_stats", {}).get("total_users", 0),
+                "google_connected": db_stats.get("user_stats", {}).get("google_connected", 0),
+                "hubspot_connected": db_stats.get("user_stats", {}).get("hubspot_connected", 0),
+                "total_emails": db_stats.get("table_sizes", {}).get("emails", 0),
+                "total_contacts": db_stats.get("table_sizes", {}).get("hubspot_contacts", 0),
+                "total_events": db_stats.get("table_sizes", {}).get("calendar_events", 0)
+            },
+            "recommendations": recommendations[:5],  # Top 5 recommendations
+            "score_breakdown": {
+                factor: {"score": score, "weight": weight}
+                for factor, score, weight in score_factors
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get system summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get system summary: {str(e)}") 

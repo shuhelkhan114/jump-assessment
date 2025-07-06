@@ -150,26 +150,59 @@ async def send_message(
                         "error": f"Tool parsing error: {str(e)}"
                     })
             
-            # Create clean summary for system message (without raw JSON)
-            clean_summary = []
+            # Create detailed summary for system message with actual data
+            detailed_summary = []
             for result in tool_results:
                 if result['status'] == 'success':
-                    # Extract user-friendly message from result
                     result_data = result.get('result', {})
                     if isinstance(result_data, dict):
-                        message = result_data.get('message', f"{result['tool']} completed successfully")
+                        tool_name = result['tool']
+                        message = result_data.get('message', f"{tool_name} completed successfully")
+                        
+                        # Include detailed data for specific functions
+                        if tool_name == 'get_calendar_schedule' and 'details' in result_data:
+                            details = result_data['details']
+                            if 'events' in details and details['events']:
+                                events_summary = f"✅ {message}\n\nACTUAL CALENDAR EVENTS:\n"
+                                for event in details['events']:
+                                    events_summary += f"- {event.get('title', 'No title')}\n"
+                                    events_summary += f"  Time: {event.get('time', 'No time')}\n"
+                                    if event.get('location'):
+                                        events_summary += f"  Location: {event.get('location')}\n"
+                                    if event.get('description'):
+                                        events_summary += f"  Description: {event.get('description')[:100]}...\n"
+                                    if event.get('organizer'):
+                                        events_summary += f"  Organizer: {event.get('organizer')}\n"
+                                    events_summary += "\n"
+                                detailed_summary.append(events_summary)
+                            else:
+                                detailed_summary.append(f"✅ {message}")
+                        elif tool_name == 'send_email' and 'details' in result_data:
+                            details = result_data['details']
+                            email_summary = f"✅ {message}\n\nEMAIL SENT:\n"
+                            email_summary += f"- To: {details.get('to', 'Unknown')}\n"
+                            email_summary += f"- Subject: {details.get('subject', 'No subject')}\n"
+                            email_summary += f"- Body: {details.get('body', 'No body')[:100]}...\n"
+                            detailed_summary.append(email_summary)
+                        elif tool_name == 'create_hubspot_contact' and 'details' in result_data:
+                            details = result_data['details']
+                            contact_summary = f"✅ {message}\n\nCONTACT CREATED:\n"
+                            contact_summary += f"- Name: {details.get('name', 'Unknown')}\n"
+                            contact_summary += f"- Email: {details.get('email', 'Unknown')}\n"
+                            contact_summary += f"- Company: {details.get('company', 'N/A')}\n"
+                            detailed_summary.append(contact_summary)
+                        else:
+                            detailed_summary.append(f"✅ {message}")
                     else:
-                        message = f"{result['tool']} completed successfully"
-                    clean_summary.append(f"✅ {message}")
+                        detailed_summary.append(f"✅ {result['tool']} completed successfully")
                 else:
-                    clean_summary.append(f"❌ {result['tool']} failed: {result.get('error', 'Unknown error')}")
+                    detailed_summary.append(f"❌ {result['tool']} failed: {result.get('error', 'Unknown error')}")
             
-            tool_summary_message = "Tool execution results:\n" + "\n".join([f"- {summary}" for summary in clean_summary])
+            tool_summary_message = "Tool execution results:\n" + "\n".join(detailed_summary)
             
-            # Get AI's final response after tool execution
-            messages.append({"role": "assistant", "content": response_content or "I'll help you with that."})
+            # Present tool results directly to the AI without forcing summarization
             messages.append({"role": "system", "content": tool_summary_message})
-            messages.append({"role": "user", "content": "Please provide a summary of the actions completed."})
+            messages.append({"role": "system", "content": "The above tool execution results contain the actual data requested by the user. Answer the user's original question using this exact data. Present the information clearly and accurately without unnecessary summarization. Only organize or format the data to make it more readable - do not change, omit, or add any information."})
             
             final_response = await openai_service.chat_completion(
                 messages=messages,
@@ -317,26 +350,59 @@ async def send_message_to_session(
                         "error": f"Tool parsing error: {str(e)}"
                     })
             
-            # Create clean summary for system message (without raw JSON)
-            clean_summary = []
+            # Create detailed summary for system message with actual data
+            detailed_summary = []
             for result in tool_results:
                 if result['status'] == 'success':
-                    # Extract user-friendly message from result
                     result_data = result.get('result', {})
                     if isinstance(result_data, dict):
-                        message = result_data.get('message', f"{result['tool']} completed successfully")
+                        tool_name = result['tool']
+                        message = result_data.get('message', f"{tool_name} completed successfully")
+                        
+                        # Include detailed data for specific functions
+                        if tool_name == 'get_calendar_schedule' and 'details' in result_data:
+                            details = result_data['details']
+                            if 'events' in details and details['events']:
+                                events_summary = f"✅ {message}\n\nACTUAL CALENDAR EVENTS:\n"
+                                for event in details['events']:
+                                    events_summary += f"- {event.get('title', 'No title')}\n"
+                                    events_summary += f"  Time: {event.get('time', 'No time')}\n"
+                                    if event.get('location'):
+                                        events_summary += f"  Location: {event.get('location')}\n"
+                                    if event.get('description'):
+                                        events_summary += f"  Description: {event.get('description')[:100]}...\n"
+                                    if event.get('organizer'):
+                                        events_summary += f"  Organizer: {event.get('organizer')}\n"
+                                    events_summary += "\n"
+                                detailed_summary.append(events_summary)
+                            else:
+                                detailed_summary.append(f"✅ {message}")
+                        elif tool_name == 'send_email' and 'details' in result_data:
+                            details = result_data['details']
+                            email_summary = f"✅ {message}\n\nEMAIL SENT:\n"
+                            email_summary += f"- To: {details.get('to', 'Unknown')}\n"
+                            email_summary += f"- Subject: {details.get('subject', 'No subject')}\n"
+                            email_summary += f"- Body: {details.get('body', 'No body')[:100]}...\n"
+                            detailed_summary.append(email_summary)
+                        elif tool_name == 'create_hubspot_contact' and 'details' in result_data:
+                            details = result_data['details']
+                            contact_summary = f"✅ {message}\n\nCONTACT CREATED:\n"
+                            contact_summary += f"- Name: {details.get('name', 'Unknown')}\n"
+                            contact_summary += f"- Email: {details.get('email', 'Unknown')}\n"
+                            contact_summary += f"- Company: {details.get('company', 'N/A')}\n"
+                            detailed_summary.append(contact_summary)
+                        else:
+                            detailed_summary.append(f"✅ {message}")
                     else:
-                        message = f"{result['tool']} completed successfully"
-                    clean_summary.append(f"✅ {message}")
+                        detailed_summary.append(f"✅ {result['tool']} completed successfully")
                 else:
-                    clean_summary.append(f"❌ {result['tool']} failed: {result.get('error', 'Unknown error')}")
+                    detailed_summary.append(f"❌ {result['tool']} failed: {result.get('error', 'Unknown error')}")
             
-            tool_summary_message = "Tool execution results:\n" + "\n".join([f"- {summary}" for summary in clean_summary])
+            tool_summary_message = "Tool execution results:\n" + "\n".join(detailed_summary)
             
-            # Get AI's final response after tool execution
-            messages.append({"role": "assistant", "content": response_content or "I'll help you with that."})
+            # Present tool results directly to the AI without forcing summarization
             messages.append({"role": "system", "content": tool_summary_message})
-            messages.append({"role": "user", "content": "Please provide a summary of the actions completed."})
+            messages.append({"role": "system", "content": "The above tool execution results contain the actual data requested by the user. Answer the user's original question using this exact data. Present the information clearly and accurately without unnecessary summarization. Only organize or format the data to make it more readable - do not change, omit, or add any information."})
             
             final_response = await openai_service.chat_completion(
                 messages=messages,
@@ -891,18 +957,21 @@ Available Actions:
 - **Create HubSpot Contacts**: I can add new contacts to your HubSpot CRM
 
 Guidelines:
+- **ACCURACY FIRST**: Present data exactly as it exists - do not summarize, paraphrase, or modify information unless specifically asked to do so
+- **NO UNNECESSARY SUMMARIZATION**: When showing calendar events, contacts, or emails, present the actual data without condensing or rewriting
+- Only organize or format data to make it more readable - never change, omit, or add information
 - Always be professional and maintain confidentiality
 - Provide specific, actionable insights when possible
 - Reference relevant emails or contact information when answering
 - If you mention specific people or companies, cite your sources
 - Use **bold text** for emphasis and bullet points for lists
 - Format your responses with proper markdown for better readability
-- Be concise but thorough in your responses
 - When context is provided, USE IT to answer the user's questions
 - If you don't have enough information, ask clarifying questions
 - When asked to perform actions (send email, schedule meeting, create contact), use the appropriate tools
 - Confirm important details before taking actions that affect external systems
 - When composing emails, always use your actual name ({user_name if user_name else "your name"}) instead of placeholders like "[Your Name]"
+- **PRESENT EXACT DATA**: When listing calendar events, show the exact titles, times, locations, and organizers as they appear in the system
 """
     
     if ongoing_instructions:

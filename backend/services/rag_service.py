@@ -2,7 +2,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import structlog
 from datetime import datetime
 from sqlalchemy import text, select
-from database import AsyncSessionLocal, Email, HubspotContact, HubspotDeal, HubspotCompany
+from database import AsyncSessionLocal, Email, HubspotContact, HubspotDeal, HubspotCompany, CalendarEvent
 from services.openai_service import openai_service
 
 logger = structlog.get_logger()
@@ -200,6 +200,86 @@ class RAGService:
         except Exception as e:
             logger.error(f"Failed to search companies: {str(e)}")
             return []
+
+    async def search_calendar_events(self, query_embedding: List[float], user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search for relevant calendar events using vector similarity"""
+        try:
+            async with AsyncSessionLocal() as session:
+                # Vector similarity search query
+                similarity_query = text("""
+                    SELECT id, title, description, location, start_datetime, end_datetime, 
+                           start_date, end_date, is_all_day, organizer_name, organizer_email, attendees,
+                           (1 - (embedding <=> :query_embedding)) AS similarity
+                    FROM calendar_events 
+                    WHERE user_id = :user_id 
+                      AND embedding IS NOT NULL
+                      AND (1 - (embedding <=> :query_embedding)) > :threshold
+                    ORDER BY similarity DESC
+                    LIMIT :limit
+                """)
+                
+                result = await session.execute(
+                    similarity_query,
+                    {
+                        "query_embedding": str(query_embedding),
+                        "user_id": user_id,
+                        "threshold": self.similarity_threshold,
+                        "limit": limit
+                    }
+                )
+                
+                events = []
+                for row in result:
+                    # Format datetime for display
+                    if row.start_datetime:
+                        start_display = row.start_datetime.strftime("%B %d, %Y at %I:%M %p")
+                    elif row.start_date:
+                        start_display = f"{row.start_date} (all day)"
+                    else:
+                        start_display = "Date not specified"
+                    
+                    if row.end_datetime:
+                        end_display = row.end_datetime.strftime("%B %d, %Y at %I:%M %p")
+                    elif row.end_date:
+                        end_display = f"{row.end_date} (all day)"
+                    else:
+                        end_display = "End date not specified"
+                    
+                    # Parse attendees JSON if available
+                    attendees_list = []
+                    if row.attendees:
+                        try:
+                            import json
+                            attendees_data = json.loads(row.attendees)
+                            attendees_list = [
+                                att.get('displayName', att.get('email', ''))
+                                for att in attendees_data 
+                                if att.get('displayName') or att.get('email')
+                            ]
+                        except:
+                            pass
+                    
+                    events.append({
+                        "id": row.id,
+                        "type": "calendar_event",
+                        "title": row.title,
+                        "description": row.description or "",
+                        "location": row.location or "",
+                        "start_display": start_display,
+                        "end_display": end_display,
+                        "is_all_day": row.is_all_day,
+                        "organizer_name": row.organizer_name or "",
+                        "organizer_email": row.organizer_email or "",
+                        "attendees": attendees_list,
+                        "similarity": float(row.similarity)
+                    })
+                
+                logger.info(f"Found {len(events)} calendar events with similarity > {self.similarity_threshold}")
+                return events
+                
+        except Exception as e:
+            logger.error(f"Failed to search calendar events: {str(e)}")
+            return []
     
     async def get_context_for_query(self, query: str, user_id: str, max_results: int = 5) -> Tuple[str, List[Dict[str, Any]]]:
         """Get relevant context for a user query using RAG"""
@@ -221,14 +301,20 @@ class RAGService:
                 logger.info(f"Detected meeting invitation query: {query}")
                 return await self._handle_meeting_query(query, query_embedding, user_id, max_results)
             
+            # Check if this is a calendar/schedule query
+            if self._is_calendar_query(query):
+                logger.info(f"Detected calendar/schedule query: {query}")
+                return await self._handle_calendar_query(query, query_embedding, user_id, max_results)
+            
             # Search across all data types
-            emails = await self.search_emails(query_embedding, user_id, limit=3)
-            contacts = await self.search_contacts(query_embedding, user_id, limit=3)
+            emails = await self.search_emails(query_embedding, user_id, limit=2)
+            contacts = await self.search_contacts(query_embedding, user_id, limit=2)
             deals = await self.search_deals(query_embedding, user_id, limit=2)
             companies = await self.search_companies(query_embedding, user_id, limit=2)
+            calendar_events = await self.search_calendar_events(query_embedding, user_id, limit=3)
             
             # Combine and sort by similarity
-            all_results = emails + contacts + deals + companies
+            all_results = emails + contacts + deals + companies + calendar_events
             all_results.sort(key=lambda x: x["similarity"], reverse=True)
             
             # Take top results
@@ -295,6 +381,32 @@ class RAGService:
         has_action_word = any(action in query_words for action in action_words)
         
         return has_meeting_word and has_action_word
+
+    def _is_calendar_query(self, query: str) -> bool:
+        """Detect if the query is specifically asking for calendar/schedule information"""
+        query_lower = query.lower()
+        calendar_keywords = [
+            'schedule', 'calendar', 'appointments', 'events', 'next 24 hours',
+            'next day', 'next week', 'today schedule', 'tomorrow schedule',
+            'this week schedule', 'upcoming events', 'upcoming meetings',
+            'what do i have', 'when am i free', 'when am i busy',
+            'show my schedule', 'show my calendar', 'my agenda',
+            'what\'s on my calendar', 'whats on my calendar'
+        ]
+        
+        # Check for exact phrase matches first
+        if any(keyword in query_lower for keyword in calendar_keywords):
+            return True
+            
+        # Check for combinations of time + schedule words
+        time_words = ['today', 'tomorrow', 'next', 'this', 'upcoming']
+        schedule_words = ['schedule', 'calendar', 'events', 'meetings', 'agenda']
+        
+        query_words = query_lower.split()
+        has_time_word = any(time_word in query_words for time_word in time_words)
+        has_schedule_word = any(schedule_word in query_words for schedule_word in schedule_words)
+        
+        return has_time_word and has_schedule_word
     
     async def _handle_contact_query(self, query: str, query_embedding: List[float], user_id: str, max_results: int = 5) -> Tuple[str, List[Dict[str, Any]]]:
         """Handle contact-specific queries by prioritizing contact results"""
@@ -415,6 +527,17 @@ class RAGService:
                     f"Location: {item['location'] or 'Not specified'}\n"
                     f"Website: {item['domain'] or 'Not provided'}\n"
                     f"Description: {item['description'] or 'No description'}"
+                )
+            elif item["type"] == "calendar_event":
+                time_info = f"From {item['start_display']} to {item['end_display']}"
+                location_info = f" at {item['location']}" if item['location'] else ""
+                organizer_info = f" (Organized by {item['organizer_name']})" if item['organizer_name'] else ""
+                attendees_info = f"\nAttendees: {', '.join(item['attendees'])}" if item['attendees'] else ""
+                
+                context_parts.append(
+                    f"📅 Event: {item['title']}\n"
+                    f"Time: {time_info}{location_info}{organizer_info}\n"
+                    f"Description: {item['description'] or 'No description'}{attendees_info}"
                 )
         
         return "\n\n---\n\n".join(context_parts)
@@ -572,6 +695,53 @@ class RAGService:
         except Exception as e:
             logger.error(f"Failed to search meeting emails: {str(e)}")
             return []
+
+    async def _handle_calendar_query(self, query: str, query_embedding: List[float], user_id: str, max_results: int = 5) -> Tuple[str, List[Dict[str, Any]]]:
+        """Handle calendar/schedule queries by prioritizing calendar events"""
+        try:
+            # For calendar queries, we want to return more results to be comprehensive
+            calendar_limit = max(max_results, 10)  # Show at least 10 calendar events
+            
+            # Search for calendar events
+            calendar_events = await self.search_calendar_events(query_embedding, user_id, limit=calendar_limit)
+            
+            if calendar_events:
+                logger.info(f"Found {len(calendar_events)} calendar events using semantic search")
+                
+                # Add some emails and contacts as additional context if there's room
+                remaining_slots = max(0, max_results - len(calendar_events))
+                additional_context = []
+                
+                if remaining_slots > 0:
+                    emails = await self.search_emails(query_embedding, user_id, limit=min(2, remaining_slots))
+                    additional_context.extend(emails)
+                    
+                    if len(additional_context) < remaining_slots:
+                        contacts = await self.search_contacts(query_embedding, user_id, limit=min(1, remaining_slots - len(additional_context)))
+                        additional_context.extend(contacts)
+                
+                # Combine calendar events with additional context
+                all_results = calendar_events + additional_context
+                top_results = all_results[:max_results] if max_results < len(all_results) else all_results
+                
+                context = self._build_context_string(top_results)
+                return context, top_results
+            else:
+                # No calendar events found, fall back to regular search
+                logger.info("No calendar events found for calendar query, falling back to regular search")
+                emails = await self.search_emails(query_embedding, user_id, limit=3)
+                contacts = await self.search_contacts(query_embedding, user_id, limit=2)
+                
+                all_results = emails + contacts
+                all_results.sort(key=lambda x: x["similarity"], reverse=True)
+                top_results = all_results[:max_results]
+                
+                context = self._build_context_string(top_results)
+                return context, top_results
+                
+        except Exception as e:
+            logger.error(f"Failed to handle calendar query: {str(e)}")
+            return "", []
     
     async def get_all_contacts(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all HubSpot contacts for a user (used for list queries)"""
