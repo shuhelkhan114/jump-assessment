@@ -9,7 +9,7 @@ logger = structlog.get_logger()
 class RAGService:
     def __init__(self):
         self.max_context_items = 5
-        self.similarity_threshold = 0.7
+        self.similarity_threshold = 0.2  # Lower threshold for better results
     
     async def search_emails(self, query_embedding: List[float], user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
         """Search for relevant emails using vector similarity"""
