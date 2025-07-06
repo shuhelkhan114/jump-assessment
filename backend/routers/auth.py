@@ -16,7 +16,7 @@ from auth import (
     get_current_user
 )
 from database import get_user_by_email, AsyncSessionLocal, User, select
-from tasks.auto_sync_tasks import trigger_initial_sync_if_needed
+from tasks.auto_sync_tasks import trigger_initial_sync_if_needed, trigger_gmail_sync, trigger_hubspot_sync
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -94,8 +94,8 @@ async def google_callback(code: str, state: str):
         
         user = await create_user_from_google(id_info, tokens)
         
-        # Trigger initial sync check for new user
-        trigger_initial_sync_if_needed.delay(user["id"])
+        # Trigger Gmail sync for Google OAuth completion
+        trigger_gmail_sync.delay(user["id"])
         
         # Create JWT token
         access_token = create_access_token(data={"sub": user["email"]})
@@ -140,8 +140,8 @@ async def google_token(auth_request: GoogleAuthRequest):
         
         user = await create_user_from_google(id_info, tokens)
         
-        # Trigger initial sync check for new user
-        trigger_initial_sync_if_needed.delay(user["id"])
+        # Trigger Gmail sync for Google OAuth completion
+        trigger_gmail_sync.delay(user["id"])
         
         # Create JWT token
         access_token = create_access_token(data={"sub": user["email"]})
@@ -234,8 +234,8 @@ async def hubspot_callback(code: str, state: str):
             # Update user with HubSpot tokens
             await update_user_hubspot_tokens(user_id, tokens)
             
-            # Trigger initial sync check for HubSpot integration
-            trigger_initial_sync_if_needed.delay(user_id)
+            # Trigger HubSpot sync for HubSpot OAuth completion
+            trigger_hubspot_sync.delay(user_id)
         
         redirect_url = f"{settings.frontend_url}/auth/hubspot/success"
         return RedirectResponse(url=redirect_url)
@@ -273,8 +273,8 @@ async def hubspot_token(auth_request: HubSpotAuthRequest, current_user: dict = D
         # Update user with HubSpot tokens
         await update_user_hubspot_tokens(current_user["id"], tokens)
         
-        # Trigger initial sync check for HubSpot integration
-        trigger_initial_sync_if_needed.delay(current_user["id"])
+        # Trigger HubSpot sync for HubSpot OAuth completion
+        trigger_hubspot_sync.delay(current_user["id"])
         
         return {"message": "HubSpot authentication successful"}
         
