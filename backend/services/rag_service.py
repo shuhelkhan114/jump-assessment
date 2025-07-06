@@ -211,6 +211,16 @@ class RAGService:
                 logger.warning("Failed to generate query embedding")
                 return "", []
             
+            # Check if this is a contact-specific query
+            if self._is_contact_query(query):
+                logger.info(f"Detected contact-specific query: {query}")
+                return await self._handle_contact_query(query, query_embedding, user_id, max_results)
+            
+            # Check if this is a meeting invitation query
+            if self._is_meeting_query(query):
+                logger.info(f"Detected meeting invitation query: {query}")
+                return await self._handle_meeting_query(query, query_embedding, user_id, max_results)
+            
             # Search across all data types
             emails = await self.search_emails(query_embedding, user_id, limit=3)
             contacts = await self.search_contacts(query_embedding, user_id, limit=3)
@@ -232,6 +242,118 @@ class RAGService:
             
         except Exception as e:
             logger.error(f"Failed to get context for query: {str(e)}")
+            return "", []
+    
+    def _is_contact_query(self, query: str) -> bool:
+        """Detect if the query is specifically asking for contacts"""
+        query_lower = query.lower()
+        contact_keywords = [
+            'list contacts', 'show contacts', 'my contacts', 'hubspot contacts',
+            'list hubspot contacts', 'show me my contacts', 'who are my contacts',
+            'all contacts', 'display contacts', 'get contacts', 'view contacts',
+            'contacts list', 'contact list', 'list of contacts', 'show all contacts',
+            'could you list', 'can you list', 'list out my', 'list my contacts'
+        ]
+        
+        # Also check for individual keywords that strongly suggest contact queries
+        strong_indicators = ['contacts', 'contact']
+        query_words = query_lower.split()
+        
+        # Check for exact phrase matches first
+        if any(keyword in query_lower for keyword in contact_keywords):
+            return True
+            
+        # Check if query contains contact-related words and action words
+        has_contact_word = any(indicator in query_words for indicator in strong_indicators)
+        action_words = ['list', 'show', 'display', 'get', 'view', 'who', 'what']
+        has_action_word = any(action in query_words for action in action_words)
+        
+        return has_contact_word and has_action_word
+    
+    def _is_meeting_query(self, query: str) -> bool:
+        """Detect if the query is specifically asking for meeting invitations"""
+        query_lower = query.lower()
+        meeting_keywords = [
+            'meeting invitations', 'meeting invitation', 'meeting invites', 'meeting invite',
+            'calendar invitations', 'calendar invitation', 'calendar invites', 'calendar invite',
+            'list meetings', 'show meetings', 'my meetings', 'pull meetings', 'pull meeting',
+            'get meetings', 'get meeting invitations', 'list meeting invitations',
+            'show meeting invitations', 'display meetings', 'view meetings'
+        ]
+        
+        # Also check for individual keywords that strongly suggest meeting queries
+        strong_indicators = ['meeting', 'meetings', 'invitation', 'invitations', 'invite', 'invites']
+        query_words = query_lower.split()
+        
+        # Check for exact phrase matches first
+        if any(keyword in query_lower for keyword in meeting_keywords):
+            return True
+            
+        # Check if query contains meeting-related words and action words
+        has_meeting_word = any(indicator in query_words for indicator in strong_indicators)
+        action_words = ['list', 'show', 'display', 'get', 'view', 'pull', 'find']
+        has_action_word = any(action in query_words for action in action_words)
+        
+        return has_meeting_word and has_action_word
+    
+    async def _handle_contact_query(self, query: str, query_embedding: List[float], user_id: str, max_results: int = 5) -> Tuple[str, List[Dict[str, Any]]]:
+        """Handle contact-specific queries by prioritizing contact results"""
+        try:
+            # Check if this is a "list all" type query
+            query_lower = query.lower()
+            list_all_keywords = ['list', 'all', 'show', 'display']
+            
+            if any(keyword in query_lower for keyword in list_all_keywords):
+                # Get all contacts for list queries
+                contacts = await self.get_all_contacts(user_id)
+                logger.info(f"List query detected, retrieved {len(contacts)} total contacts")
+            else:
+                # Use semantic search for specific contact queries
+                contacts = await self.search_contacts(query_embedding, user_id, limit=max_results)
+                logger.info(f"Semantic search for contacts, found {len(contacts)} relevant contacts")
+            
+            # If we have contacts, prioritize them
+            if contacts:
+                # For list queries, show all contacts found (up to a reasonable limit)
+                if any(keyword in query_lower for keyword in list_all_keywords):
+                    # Show more contacts for list queries, limit to 10 to avoid overwhelming
+                    top_results = contacts[:10]
+                    # Add a few other relevant items if there's room
+                    if len(top_results) < max_results:
+                        remaining_slots = max_results - len(top_results)
+                        emails = await self.search_emails(query_embedding, user_id, limit=min(2, remaining_slots))
+                        top_results.extend(emails[:remaining_slots])
+                else:
+                    # For specific queries, use normal limits
+                    remaining_slots = max(0, max_results - len(contacts))
+                    
+                    emails = await self.search_emails(query_embedding, user_id, limit=min(2, remaining_slots))
+                    deals = await self.search_deals(query_embedding, user_id, limit=min(1, remaining_slots))
+                    companies = await self.search_companies(query_embedding, user_id, limit=min(1, remaining_slots))
+                    
+                    # Combine with contacts first (higher priority)
+                    all_results = contacts + emails + deals + companies
+                    top_results = all_results[:max_results]
+                
+                logger.info(f"Contact query handled: {len([r for r in top_results if r['type'] == 'contact'])} contacts in {len(top_results)} total results")
+            else:
+                # No contacts found, fall back to regular search
+                logger.info("No contacts found for contact query, falling back to regular search")
+                emails = await self.search_emails(query_embedding, user_id, limit=3)
+                deals = await self.search_deals(query_embedding, user_id, limit=2)
+                companies = await self.search_companies(query_embedding, user_id, limit=2)
+                
+                all_results = emails + deals + companies
+                all_results.sort(key=lambda x: x["similarity"], reverse=True)
+                top_results = all_results[:max_results]
+            
+            # Build context string
+            context = self._build_context_string(top_results)
+            
+            return context, top_results
+            
+        except Exception as e:
+            logger.error(f"Failed to handle contact query: {str(e)}")
             return "", []
     
     def _format_date(self, date_string: str) -> str:
@@ -361,6 +483,126 @@ class RAGService:
         except Exception as e:
             logger.error(f"Failed to store contact embedding: {str(e)}")
             return False
+
+    async def _handle_meeting_query(self, query: str, query_embedding: List[float], user_id: str, max_results: int = 5) -> Tuple[str, List[Dict[str, Any]]]:
+        """Handle meeting invitation queries by searching for meeting-related emails"""
+        try:
+            # For meeting queries, we want to return more results to be comprehensive
+            meeting_limit = max(max_results, 10)  # Show at least 10 meeting invitations
+            
+            # First, try to get meeting emails using direct keyword search
+            meeting_emails = await self.search_meeting_emails(user_id, limit=meeting_limit)
+            
+            if meeting_emails:
+                logger.info(f"Found {len(meeting_emails)} meeting emails using direct search")
+                # Build context from meeting emails
+                context = self._build_context_string(meeting_emails)
+                return context, meeting_emails
+            else:
+                # Fall back to semantic search with relaxed parameters
+                logger.info("No meeting emails found with direct search, using semantic search")
+                emails = await self.search_emails(query_embedding, user_id, limit=meeting_limit)
+                
+                # Filter for meeting-related emails
+                meeting_related = []
+                for email in emails:
+                    subject = email.get('subject', '').lower()
+                    content = email.get('content', '').lower()
+                    
+                    if any(keyword in subject or keyword in content for keyword in 
+                           ['meeting', 'invitation', 'invite', 'calendar', 'scheduled', 'rsvp']):
+                        meeting_related.append(email)
+                
+                if meeting_related:
+                    context = self._build_context_string(meeting_related)
+                    return context, meeting_related
+                else:
+                    # No meeting-related emails found
+                    return "", []
+                    
+        except Exception as e:
+            logger.error(f"Failed to handle meeting query: {str(e)}")
+            return "", []
+    
+    async def search_meeting_emails(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search for meeting-related emails using direct keyword matching"""
+        try:
+            async with AsyncSessionLocal() as session:
+                # Search for emails with meeting-related keywords
+                query = text("""
+                    SELECT id, subject, content, sender, recipient, received_at
+                    FROM emails 
+                    WHERE user_id = :user_id 
+                    AND (
+                        LOWER(subject) LIKE '%meeting%' OR 
+                        LOWER(subject) LIKE '%invitation%' OR 
+                        LOWER(subject) LIKE '%invite%' OR 
+                        LOWER(subject) LIKE '%calendar%' OR
+                        LOWER(subject) LIKE '%scheduled%' OR
+                        LOWER(subject) LIKE '%rsvp%' OR
+                        LOWER(content) LIKE '%meeting%' OR
+                        LOWER(content) LIKE '%invitation%' OR
+                        LOWER(content) LIKE '%invite%' OR
+                        LOWER(content) LIKE '%calendar%' OR
+                        LOWER(content) LIKE '%scheduled%' OR
+                        LOWER(content) LIKE '%rsvp%'
+                    )
+                    ORDER BY received_at DESC
+                    LIMIT :limit
+                """)
+                
+                result = await session.execute(query, {"user_id": user_id, "limit": limit})
+                
+                meetings = []
+                for row in result:
+                    meetings.append({
+                        "id": row.id,
+                        "type": "email",
+                        "subject": row.subject,
+                        "content": row.content[:500] if row.content else "",
+                        "sender": row.sender,
+                        "recipient": row.recipient,
+                        "received_at": row.received_at.isoformat() if row.received_at else None,
+                        "similarity": 1.0  # Set high similarity for direct matches
+                    })
+                
+                logger.info(f"Found {len(meetings)} meeting emails using direct search")
+                return meetings
+                
+        except Exception as e:
+            logger.error(f"Failed to search meeting emails: {str(e)}")
+            return []
+    
+    async def get_all_contacts(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get all HubSpot contacts for a user (used for list queries)"""
+        try:
+            async with AsyncSessionLocal() as session:
+                # Get all contacts without similarity filtering
+                result = await session.execute(
+                    select(HubspotContact).where(HubspotContact.user_id == user_id)
+                )
+                
+                contacts = []
+                for contact in result.scalars().all():
+                    name = f"{contact.firstname or ''} {contact.lastname or ''}".strip()
+                    contacts.append({
+                        "id": contact.id,
+                        "type": "contact",
+                        "name": name or "Unknown",
+                        "email": contact.email,
+                        "phone": contact.phone,
+                        "company": contact.company,
+                        "jobtitle": contact.jobtitle,
+                        "industry": contact.industry,
+                        "similarity": 1.0  # Set high similarity since these are direct matches
+                    })
+                
+                logger.info(f"Retrieved {len(contacts)} total contacts for user {user_id}")
+                return contacts
+                
+        except Exception as e:
+            logger.error(f"Failed to get all contacts: {str(e)}")
+            return []
 
 # Global instance
 rag_service = RAGService() 

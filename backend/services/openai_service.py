@@ -113,7 +113,12 @@ class OpenAIService:
             
             # Add context if provided (RAG)
             if context:
-                context_message = f"Here's relevant context to help answer the user's question:\n\n{context}\n\nPlease use this context to provide accurate and helpful responses."
+                context_message = f"""CONTEXT FROM USER'S ACTUAL DATA:
+The following information is retrieved from the user's connected Gmail and HubSpot accounts. This is REAL data that you should use to answer their questions:
+
+{context}
+
+IMPORTANT: Use this context to provide accurate responses. When listing contacts, emails, or other data, use the information provided above. Do not say you don't have access to their data - you do have access through this context."""
                 chat_messages.append({"role": "system", "content": context_message})
             
             # Add conversation messages

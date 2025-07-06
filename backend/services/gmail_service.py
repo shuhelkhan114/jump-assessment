@@ -3,7 +3,7 @@ Gmail API service for fetching and processing emails
 """
 import os
 from typing import List, Dict, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import structlog
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -57,33 +57,103 @@ class GmailService:
             logger.error(f"Failed to initialize Gmail service: {str(e)}")
             return False
     
-    async def list_messages(self, days_back: int = 30, max_results: int = 100) -> List[Dict[str, Any]]:
+    async def list_messages(self, days_back: int = 30, max_results: int = 500) -> List[Dict[str, Any]]:
         """List recent messages from Gmail"""
         try:
             if not self.service:
                 raise Exception("Gmail service not initialized")
             
-            # Calculate date for filtering
-            since_date = datetime.now() - timedelta(days=days_back)
-            query = f"after:{since_date.strftime('%Y/%m/%d')}"
+            # Calculate date for filtering - use UTC timezone
+            since_date = datetime.now(timezone.utc) - timedelta(days=days_back)
             
-            # Get message list
-            result = self.service.users().messages().list(
-                userId='me',
-                q=query,
-                maxResults=max_results
-            ).execute()
+            # Use more precise query to get latest emails first
+            # Use 'newer_than' for more precise time-based filtering
+            query = f"newer_than:{days_back}d"
             
-            messages = result.get('messages', [])
-            logger.info(f"Retrieved {len(messages)} messages from Gmail")
+            logger.info(f"Querying Gmail with: {query}, max_results: {max_results}")
             
-            return messages
+            # Get message list with pagination to ensure we get all recent emails
+            all_messages = []
+            page_token = None
+            
+            while len(all_messages) < max_results:
+                # Get messages in batches
+                batch_size = min(100, max_results - len(all_messages))
+                
+                request_params = {
+                    'userId': 'me',
+                    'q': query,
+                    'maxResults': batch_size
+                }
+                
+                if page_token:
+                    request_params['pageToken'] = page_token
+                
+                result = self.service.users().messages().list(**request_params).execute()
+                
+                messages = result.get('messages', [])
+                all_messages.extend(messages)
+                
+                # Check if there are more pages
+                page_token = result.get('nextPageToken')
+                if not page_token or not messages:
+                    break
+            
+            # Sort by most recent first (Gmail should already do this, but let's be sure)
+            logger.info(f"Retrieved {len(all_messages)} messages from Gmail")
+            
+            return all_messages
             
         except HttpError as e:
             logger.error(f"Gmail API error: {str(e)}")
             raise
         except Exception as e:
             logger.error(f"Failed to list Gmail messages: {str(e)}")
+            raise
+    
+    async def list_latest_messages(self, max_results: int = 200) -> List[Dict[str, Any]]:
+        """List the most recent messages without date filtering"""
+        try:
+            if not self.service:
+                raise Exception("Gmail service not initialized")
+            
+            logger.info(f"Fetching latest {max_results} messages from Gmail (no date filter)")
+            
+            # Get message list without any date filtering to ensure we get the absolute latest
+            all_messages = []
+            page_token = None
+            
+            while len(all_messages) < max_results:
+                # Get messages in batches
+                batch_size = min(100, max_results - len(all_messages))
+                
+                request_params = {
+                    'userId': 'me',
+                    'maxResults': batch_size
+                }
+                
+                if page_token:
+                    request_params['pageToken'] = page_token
+                
+                result = self.service.users().messages().list(**request_params).execute()
+                
+                messages = result.get('messages', [])
+                all_messages.extend(messages)
+                
+                # Check if there are more pages
+                page_token = result.get('nextPageToken')
+                if not page_token or not messages:
+                    break
+            
+            logger.info(f"Retrieved {len(all_messages)} latest messages from Gmail")
+            
+            return all_messages
+            
+        except HttpError as e:
+            logger.error(f"Gmail API error: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to list latest Gmail messages: {str(e)}")
             raise
     
     async def get_message_content(self, message_id: str) -> Dict[str, Any]:

@@ -76,6 +76,18 @@ def _sync_gmail_emails_sync(user_id: str, days_back: int = 30) -> Dict[str, Any]
         # Fetch messages from Gmail (using asyncio.run for the async service call)
         messages = asyncio.run(gmail_service.list_messages(days_back=days_back))
         
+        # Also fetch the latest 200 messages without date filtering to ensure we don't miss any
+        if days_back <= 7:  # Only for recent syncs to avoid too much processing
+            latest_messages = asyncio.run(gmail_service.list_latest_messages(max_results=200))
+            
+            # Combine and deduplicate messages
+            all_message_ids = {msg['id'] for msg in messages}
+            for msg in latest_messages:
+                if msg['id'] not in all_message_ids:
+                    messages.append(msg)
+            
+            logger.info(f"Combined sync: {len(messages)} total messages (including latest without date filter)")
+        
         new_emails = []
         processed_count = 0
         

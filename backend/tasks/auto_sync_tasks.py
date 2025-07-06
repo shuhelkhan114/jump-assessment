@@ -6,41 +6,94 @@ from datetime import datetime, timedelta
 from typing import List
 import structlog
 from celery import shared_task
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
 from tasks.gmail_tasks import sync_gmail_emails
 from tasks.hubspot_tasks import sync_hubspot_contacts, sync_hubspot_deals, sync_hubspot_companies
+from database import User
+from config import get_settings
 
 logger = structlog.get_logger()
+settings = get_settings()
+
+# Create synchronous database engine for Celery tasks
+sync_engine = create_engine(settings.database_url, echo=False)
+SyncSessionLocal = sessionmaker(bind=sync_engine)
 
 @shared_task(bind=True, max_retries=3)
 def auto_sync_all_users(self):
     """
     Periodic task to sync data for all users every 5 minutes
-    Note: This is a simplified version that will sync known users
     """
     try:
         logger.info("🔄 Starting auto-sync for all users")
         
-        # For simplicity, we'll just trigger sync for the known user
-        # In a real implementation, we'd query the database for all users
-        known_user_id = "ba433c75-8a32-430c-99e7-e3e8069501ca"
-        
-        # Queue sync tasks for the known user
-        gmail_result = sync_gmail_emails.delay(known_user_id)
-        contacts_result = sync_hubspot_contacts.delay(known_user_id)
-        deals_result = sync_hubspot_deals.delay(known_user_id)
-        companies_result = sync_hubspot_companies.delay(known_user_id)
-        
-        result = {
-            "users_processed": 1,
-            "gmail_synced": 1,
-            "hubspot_contacts_synced": 1,
-            "hubspot_deals_synced": 1,
-            "hubspot_companies_synced": 1,
-            "errors": []
-        }
-        
-        logger.info(f"✅ Auto-sync completed: {result}")
-        return result
+        # Get all users who have connected their accounts
+        with SyncSessionLocal() as session:
+            # Query for users who have Google or HubSpot tokens
+            result = session.execute(
+                select(User).where(
+                    (User.google_access_token.is_not(None)) |
+                    (User.hubspot_access_token.is_not(None))
+                )
+            )
+            users = result.scalars().all()
+            
+            if not users:
+                logger.info("No users with connected accounts found")
+                return {
+                    "users_processed": 0,
+                    "gmail_synced": 0,
+                    "hubspot_contacts_synced": 0,
+                    "hubspot_deals_synced": 0,
+                    "hubspot_companies_synced": 0,
+                    "errors": []
+                }
+            
+            logger.info(f"Found {len(users)} users with connected accounts")
+            
+            # Track results
+            gmail_synced = 0
+            hubspot_contacts_synced = 0
+            hubspot_deals_synced = 0
+            hubspot_companies_synced = 0
+            errors = []
+            
+            # Queue sync tasks for each user
+            for user in users:
+                try:
+                    # Sync Gmail if user has Google token
+                    if user.google_access_token:
+                        gmail_result = sync_gmail_emails.delay(user.id, days_back=7)
+                        gmail_synced += 1
+                        logger.info(f"📧 Gmail sync queued for user {user.id}")
+                    
+                    # Sync HubSpot if user has HubSpot token
+                    if user.hubspot_access_token:
+                        contacts_result = sync_hubspot_contacts.delay(user.id)
+                        deals_result = sync_hubspot_deals.delay(user.id)
+                        companies_result = sync_hubspot_companies.delay(user.id)
+                        hubspot_contacts_synced += 1
+                        hubspot_deals_synced += 1
+                        hubspot_companies_synced += 1
+                        logger.info(f"🔗 HubSpot sync queued for user {user.id}")
+                    
+                except Exception as user_error:
+                    error_msg = f"Failed to queue sync for user {user.id}: {str(user_error)}"
+                    errors.append(error_msg)
+                    logger.error(error_msg)
+            
+            result = {
+                "users_processed": len(users),
+                "gmail_synced": gmail_synced,
+                "hubspot_contacts_synced": hubspot_contacts_synced,
+                "hubspot_deals_synced": hubspot_deals_synced,
+                "hubspot_companies_synced": hubspot_companies_synced,
+                "errors": errors
+            }
+            
+            logger.info(f"✅ Auto-sync completed for {len(users)} users: {result}")
+            return result
         
     except Exception as exc:
         logger.error(f"❌ Auto-sync failed: {str(exc)}")
@@ -90,8 +143,8 @@ def initial_gmail_sync(self, user_id: str):
     try:
         logger.info(f"📧 Starting initial Gmail sync for user {user_id}")
         
-        # Queue Gmail sync task
-        gmail_result = sync_gmail_emails.delay(user_id)
+        # Queue Gmail sync task with shorter time period to get latest emails first
+        gmail_result = sync_gmail_emails.delay(user_id, days_back=7)  # Start with 7 days
         
         result = {
             "user_id": user_id,
