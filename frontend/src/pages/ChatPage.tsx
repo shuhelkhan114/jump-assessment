@@ -168,9 +168,9 @@ export const ChatPage: React.FC = () => {
                   components={{
                     // Custom styling for markdown elements
                     p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-                    ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-1">{children}</ul>,
-                    ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-1">{children}</ol>,
-                    li: ({ children }) => <li className="mb-0">{children}</li>,
+                    ul: ({ children }) => <ul className="list-disc list-outside ml-4 mb-2 space-y-1">{children}</ul>,
+                    ol: ({ children }) => <ol className="list-decimal list-outside ml-4 mb-2 space-y-1">{children}</ol>,
+                    li: ({ children }) => <li className="mb-0 pl-1">{children}</li>,
                     strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
                     em: ({ children }) => <em className="italic">{children}</em>,
                     code: ({ children }) => (

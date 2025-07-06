@@ -7,14 +7,21 @@ import asyncio
 import json
 import structlog
 from datetime import datetime
-from sqlalchemy import text
+from sqlalchemy import text, create_engine, select
+from sqlalchemy.orm import sessionmaker
 
-from database import AsyncSessionLocal, User, HubspotContact, HubspotDeal, HubspotCompany, select
+from database import User, HubspotContact, HubspotDeal, HubspotCompany
 from services.hubspot_service import hubspot_service
 from services.openai_service import openai_service
 from celery_app import celery_app
+from config import get_settings
 
 logger = structlog.get_logger()
+settings = get_settings()
+
+# Create synchronous database engine for Celery tasks
+sync_engine = create_engine(settings.database_url, echo=False)
+SyncSessionLocal = sessionmaker(bind=sync_engine)
 
 @celery_app.task(bind=True, max_retries=3)
 def sync_hubspot_contacts(self, user_id: str):
@@ -22,8 +29,8 @@ def sync_hubspot_contacts(self, user_id: str):
     try:
         logger.info(f"Starting HubSpot contacts sync for user {user_id}")
         
-        # Run async function
-        result = asyncio.run(_sync_hubspot_contacts_async(user_id))
+        # Run sync function
+        result = _sync_hubspot_contacts_sync(user_id)
         
         logger.info(f"HubSpot contacts sync completed for user {user_id}: {result}")
         return result
@@ -38,11 +45,11 @@ def sync_hubspot_contacts(self, user_id: str):
         else:
             raise e
 
-async def _sync_hubspot_contacts_async(user_id: str) -> Dict[str, Any]:
-    """Async implementation of HubSpot contacts sync"""
-    async with AsyncSessionLocal() as session:
+def _sync_hubspot_contacts_sync(user_id: str) -> Dict[str, Any]:
+    """Sync implementation of HubSpot contacts sync"""
+    with SyncSessionLocal() as session:
         # Get user with OAuth tokens
-        result = await session.execute(
+        result = session.execute(
             select(User).where(User.id == user_id)
         )
         user = result.scalar_one_or_none()
@@ -58,7 +65,7 @@ async def _sync_hubspot_contacts_async(user_id: str) -> Dict[str, Any]:
             raise Exception("Failed to initialize HubSpot service")
         
         # Get existing HubSpot contact IDs to avoid duplicates
-        existing_result = await session.execute(
+        existing_result = session.execute(
             select(HubspotContact.hubspot_id).where(HubspotContact.user_id == user_id)
         )
         existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
@@ -68,7 +75,7 @@ async def _sync_hubspot_contacts_async(user_id: str) -> Dict[str, Any]:
         after = None
         
         while True:
-            contacts_data = await hubspot_service.get_contacts(limit=100, after=after)
+            contacts_data = asyncio.run(hubspot_service.get_contacts(limit=100, after=after))
             contacts = contacts_data.get('results', [])
             
             if not contacts:
@@ -126,7 +133,7 @@ async def _sync_hubspot_contacts_async(user_id: str) -> Dict[str, Any]:
                 
                 # Commit in batches
                 if processed_count % 20 == 0:
-                    await session.commit()
+                    session.commit()
                     logger.info(f"Processed {processed_count} contacts for user {user_id}")
                 
             except Exception as e:
@@ -134,14 +141,14 @@ async def _sync_hubspot_contacts_async(user_id: str) -> Dict[str, Any]:
                 continue
         
         # Final commit
-        await session.commit()
+        session.commit()
         
         # Schedule embedding generation for new contacts
         if new_contacts:
             generate_hubspot_embeddings.delay(user_id, 'contacts', [contact.id for contact in new_contacts])
         
         # Close HubSpot service
-        await hubspot_service.close()
+        asyncio.run(hubspot_service.close())
         
         return {
             "user_id": user_id,
@@ -157,8 +164,8 @@ def sync_hubspot_deals(self, user_id: str):
     try:
         logger.info(f"Starting HubSpot deals sync for user {user_id}")
         
-        # Run async function
-        result = asyncio.run(_sync_hubspot_deals_async(user_id))
+        # Run sync function
+        result = _sync_hubspot_deals_sync(user_id)
         
         logger.info(f"HubSpot deals sync completed for user {user_id}: {result}")
         return result
@@ -173,11 +180,11 @@ def sync_hubspot_deals(self, user_id: str):
         else:
             raise e
 
-async def _sync_hubspot_deals_async(user_id: str) -> Dict[str, Any]:
-    """Async implementation of HubSpot deals sync"""
-    async with AsyncSessionLocal() as session:
+def _sync_hubspot_deals_sync(user_id: str) -> Dict[str, Any]:
+    """Sync implementation of HubSpot deals sync"""
+    with SyncSessionLocal() as session:
         # Get user with OAuth tokens
-        result = await session.execute(
+        result = session.execute(
             select(User).where(User.id == user_id)
         )
         user = result.scalar_one_or_none()
@@ -193,7 +200,7 @@ async def _sync_hubspot_deals_async(user_id: str) -> Dict[str, Any]:
             raise Exception("Failed to initialize HubSpot service")
         
         # Get existing HubSpot deal IDs to avoid duplicates
-        existing_result = await session.execute(
+        existing_result = session.execute(
             select(HubspotDeal.hubspot_id).where(HubspotDeal.user_id == user_id)
         )
         existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
@@ -203,7 +210,7 @@ async def _sync_hubspot_deals_async(user_id: str) -> Dict[str, Any]:
         after = None
         
         while True:
-            deals_data = await hubspot_service.get_deals(limit=100, after=after)
+            deals_data = asyncio.run(hubspot_service.get_deals(limit=100, after=after))
             deals = deals_data.get('results', [])
             
             if not deals:
@@ -261,7 +268,7 @@ async def _sync_hubspot_deals_async(user_id: str) -> Dict[str, Any]:
                 
                 # Commit in batches
                 if processed_count % 20 == 0:
-                    await session.commit()
+                    session.commit()
                     logger.info(f"Processed {processed_count} deals for user {user_id}")
                 
             except Exception as e:
@@ -269,14 +276,14 @@ async def _sync_hubspot_deals_async(user_id: str) -> Dict[str, Any]:
                 continue
         
         # Final commit
-        await session.commit()
+        session.commit()
         
         # Schedule embedding generation for new deals
         if new_deals:
             generate_hubspot_embeddings.delay(user_id, 'deals', [deal.id for deal in new_deals])
         
         # Close HubSpot service
-        await hubspot_service.close()
+        asyncio.run(hubspot_service.close())
         
         return {
             "user_id": user_id,
@@ -292,8 +299,8 @@ def sync_hubspot_companies(self, user_id: str):
     try:
         logger.info(f"Starting HubSpot companies sync for user {user_id}")
         
-        # Run async function
-        result = asyncio.run(_sync_hubspot_companies_async(user_id))
+        # Run sync function
+        result = _sync_hubspot_companies_sync(user_id)
         
         logger.info(f"HubSpot companies sync completed for user {user_id}: {result}")
         return result
@@ -308,11 +315,11 @@ def sync_hubspot_companies(self, user_id: str):
         else:
             raise e
 
-async def _sync_hubspot_companies_async(user_id: str) -> Dict[str, Any]:
-    """Async implementation of HubSpot companies sync"""
-    async with AsyncSessionLocal() as session:
+def _sync_hubspot_companies_sync(user_id: str) -> Dict[str, Any]:
+    """Sync implementation of HubSpot companies sync"""
+    with SyncSessionLocal() as session:
         # Get user with OAuth tokens
-        result = await session.execute(
+        result = session.execute(
             select(User).where(User.id == user_id)
         )
         user = result.scalar_one_or_none()
@@ -328,7 +335,7 @@ async def _sync_hubspot_companies_async(user_id: str) -> Dict[str, Any]:
             raise Exception("Failed to initialize HubSpot service")
         
         # Get existing HubSpot company IDs to avoid duplicates
-        existing_result = await session.execute(
+        existing_result = session.execute(
             select(HubspotCompany.hubspot_id).where(HubspotCompany.user_id == user_id)
         )
         existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
@@ -338,7 +345,7 @@ async def _sync_hubspot_companies_async(user_id: str) -> Dict[str, Any]:
         after = None
         
         while True:
-            companies_data = await hubspot_service.get_companies(limit=100, after=after)
+            companies_data = asyncio.run(hubspot_service.get_companies(limit=100, after=after))
             companies = companies_data.get('results', [])
             
             if not companies:
@@ -399,7 +406,7 @@ async def _sync_hubspot_companies_async(user_id: str) -> Dict[str, Any]:
                 
                 # Commit in batches
                 if processed_count % 20 == 0:
-                    await session.commit()
+                    session.commit()
                     logger.info(f"Processed {processed_count} companies for user {user_id}")
                 
             except Exception as e:
@@ -407,14 +414,14 @@ async def _sync_hubspot_companies_async(user_id: str) -> Dict[str, Any]:
                 continue
         
         # Final commit
-        await session.commit()
+        session.commit()
         
         # Schedule embedding generation for new companies
         if new_companies:
             generate_hubspot_embeddings.delay(user_id, 'companies', [company.id for company in new_companies])
         
         # Close HubSpot service
-        await hubspot_service.close()
+        asyncio.run(hubspot_service.close())
         
         return {
             "user_id": user_id,
@@ -430,8 +437,8 @@ def generate_hubspot_embeddings(self, user_id: str, object_type: str, object_ids
     try:
         logger.info(f"Starting embedding generation for {len(object_ids)} {object_type}")
         
-        # Run async function
-        result = asyncio.run(_generate_hubspot_embeddings_async(user_id, object_type, object_ids))
+        # Run sync function
+        result = _generate_hubspot_embeddings_sync(user_id, object_type, object_ids)
         
         logger.info(f"HubSpot embedding generation completed: {result}")
         return result
@@ -446,9 +453,9 @@ def generate_hubspot_embeddings(self, user_id: str, object_type: str, object_ids
         else:
             raise e
 
-async def _generate_hubspot_embeddings_async(user_id: str, object_type: str, object_ids: List[str]) -> Dict[str, Any]:
-    """Async implementation of HubSpot embedding generation"""
-    async with AsyncSessionLocal() as session:
+def _generate_hubspot_embeddings_sync(user_id: str, object_type: str, object_ids: List[str]) -> Dict[str, Any]:
+    """Sync implementation of HubSpot embedding generation"""
+    with SyncSessionLocal() as session:
         # Get objects without embeddings based on type
         if object_type == 'contacts':
             model_class = HubspotContact
@@ -462,7 +469,7 @@ async def _generate_hubspot_embeddings_async(user_id: str, object_type: str, obj
         else:
             raise ValueError(f"Unknown object type: {object_type}")
         
-        result = await session.execute(
+        result = session.execute(
             select(model_class).where(
                 model_class.user_id == user_id,
                 model_class.id.in_(object_ids),
@@ -479,7 +486,7 @@ async def _generate_hubspot_embeddings_async(user_id: str, object_type: str, obj
                 obj_text = text_creator(obj)
                 
                 # Generate embedding
-                embedding = await openai_service.generate_embedding(obj_text)
+                embedding = asyncio.run(openai_service.generate_embedding(obj_text))
                 
                 if embedding:
                     # Update object with embedding
@@ -488,7 +495,7 @@ async def _generate_hubspot_embeddings_async(user_id: str, object_type: str, obj
                     
                     # Commit in batches
                     if processed_count % 5 == 0:
-                        await session.commit()
+                        session.commit()
                         logger.info(f"Generated embeddings for {processed_count} {object_type}")
                 
             except Exception as e:
@@ -496,7 +503,7 @@ async def _generate_hubspot_embeddings_async(user_id: str, object_type: str, obj
                 continue
         
         # Final commit
-        await session.commit()
+        session.commit()
         
         return {
             "user_id": user_id,

@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional, Tuple
 import structlog
+from datetime import datetime
 from sqlalchemy import text, select
 from database import AsyncSessionLocal, Email, HubspotContact, HubspotDeal, HubspotCompany
 from services.openai_service import openai_service
@@ -233,6 +234,24 @@ class RAGService:
             logger.error(f"Failed to get context for query: {str(e)}")
             return "", []
     
+    def _format_date(self, date_string: str) -> str:
+        """Format date string to readable format"""
+        try:
+            if not date_string:
+                return "Date not available"
+            
+            # Handle both ISO format and datetime objects
+            if isinstance(date_string, str):
+                # Parse ISO format like "2025-07-05T07:03:56.261489"
+                dt = datetime.fromisoformat(date_string.replace('Z', ''))
+            else:
+                dt = date_string
+            
+            # Format to "July 5, 2025"
+            return dt.strftime("%B %d, %Y")
+        except Exception:
+            return date_string  # Return original if formatting fails
+
     def _build_context_string(self, results: List[Dict[str, Any]]) -> str:
         """Build a context string from search results"""
         if not results:
@@ -242,10 +261,11 @@ class RAGService:
         
         for item in results:
             if item["type"] == "email":
+                formatted_date = self._format_date(item['received_at'])
                 context_parts.append(
                     f"📧 Email from {item['sender']} - Subject: {item['subject']}\n"
                     f"Content: {item['content']}\n"
-                    f"Date: {item['received_at']}"
+                    f"Date: {formatted_date}"
                 )
             elif item["type"] == "contact":
                 job_info = f" ({item['jobtitle']})" if item['jobtitle'] else ""

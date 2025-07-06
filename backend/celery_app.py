@@ -12,8 +12,9 @@ celery_app = Celery(
     backend=settings.redis_url,
     include=[
         "tasks.gmail_tasks",
-        "tasks.hubspot_tasks",
-        "tasks.ai_tasks"
+        "tasks.hubspot_tasks", 
+        "tasks.ai_tasks",
+        "tasks.auto_sync_tasks"
     ]
 )
 
@@ -28,6 +29,13 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
+    # Periodic task schedule
+    beat_schedule={
+        'auto-sync-all-users': {
+            'task': 'tasks.auto_sync_tasks.auto_sync_all_users',
+            'schedule': 300.0,  # Run every 5 minutes (300 seconds)
+        },
+    },
 )
 
 # Auto-discover tasks
