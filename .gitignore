@@ -390,4 +390,4 @@ coverage
 .fuse_hidden*
 .directory
 .Trash-*
-.nfs* 
+.nfs* __pycache__/
