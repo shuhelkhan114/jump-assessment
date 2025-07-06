@@ -54,6 +54,69 @@ async def get_sync_status(current_user: dict = Depends(get_current_user)):
             detail="Failed to get sync status"
         )
 
+@router.get("/status")
+async def get_integration_status(current_user: dict = Depends(get_current_user)):
+    """Get integration connection status"""
+    try:
+        return {
+            "google": bool(current_user.get("google_access_token")),
+            "hubspot": bool(current_user.get("hubspot_access_token"))
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get integration status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get integration status"
+        )
+
+@router.get("/hubspot/auth-url")
+async def get_hubspot_auth_url(current_user: dict = Depends(get_current_user)):
+    """Get HubSpot OAuth authorization URL"""
+    try:
+        from config import get_settings
+        import secrets
+        
+        settings = get_settings()
+        
+        if not settings.hubspot_client_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="HubSpot OAuth not configured"
+            )
+        
+        # Import the oauth_states from auth module to share state storage
+        try:
+            from routers.auth import oauth_states
+        except ImportError:
+            # Fallback if not available
+            oauth_states = {}
+        
+        # Generate state for CSRF protection
+        state = secrets.token_urlsafe(32)
+        oauth_states[state] = {"provider": "hubspot", "user_id": current_user["id"]}
+        
+        # HubSpot OAuth parameters
+        from urllib.parse import urlencode
+        params = {
+            "client_id": settings.hubspot_client_id,
+            "redirect_uri": settings.hubspot_redirect_uri,
+            "scope": "oauth crm.objects.owners.read",
+            "optional_scope": "crm.objects.contacts.read crm.objects.contacts.write crm.objects.companies.read crm.objects.deals.read",
+            "state": state
+        }
+        
+        auth_url = f"https://app.hubspot.com/oauth/authorize?{urlencode(params)}"
+        
+        return {"auth_url": auth_url}
+        
+    except Exception as e:
+        logger.error(f"Failed to get HubSpot auth URL: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get HubSpot auth URL"
+        )
+
 @router.post("/gmail/sync")
 async def sync_gmail(
     days_back: int = 30,

@@ -7,6 +7,7 @@ from datetime import datetime
 import structlog
 import httpx
 from urllib.parse import urlencode
+import asyncio
 
 logger = structlog.get_logger()
 
@@ -22,13 +23,17 @@ class HubSpotService:
         """Initialize HubSpot service with OAuth token"""
         try:
             self.access_token = access_token
+            
+            # Enhanced client configuration with better timeout and retry settings
             self.client = httpx.AsyncClient(
                 base_url=self.base_url,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json"
                 },
-                timeout=30.0
+                timeout=httpx.Timeout(30.0, connect=10.0, read=30.0, write=10.0),
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                follow_redirects=True
             )
             
             logger.info("HubSpot service initialized successfully")
@@ -37,6 +42,44 @@ class HubSpotService:
         except Exception as e:
             logger.error(f"Failed to initialize HubSpot service: {str(e)}")
             return False
+    
+    async def _make_request_with_retry(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
+        """Make HTTP request with retry logic for network issues"""
+        max_retries = 3
+        base_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                if method.upper() == "GET":
+                    response = await self.client.get(endpoint, **kwargs)
+                elif method.upper() == "POST":
+                    response = await self.client.post(endpoint, **kwargs)
+                elif method.upper() == "PUT":
+                    response = await self.client.put(endpoint, **kwargs)
+                elif method.upper() == "PATCH":
+                    response = await self.client.patch(endpoint, **kwargs)
+                elif method.upper() == "DELETE":
+                    response = await self.client.delete(endpoint, **kwargs)
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
+                
+                return response
+                
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadTimeout) as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Network error on attempt {attempt + 1}/{max_retries}: {str(e)}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Network error after {max_retries} attempts: {str(e)}")
+                    raise Exception(f"HubSpot API unavailable after {max_retries} attempts. Please check your internet connection and try again later.")
+            except httpx.RequestError as e:
+                logger.error(f"HubSpot request error: {str(e)}")
+                raise Exception(f"HubSpot API request failed: {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error in HubSpot request: {str(e)}")
+                raise
     
     async def get_contacts(self, limit: int = 100, after: Optional[str] = None) -> Dict[str, Any]:
         """Get contacts from HubSpot CRM"""
@@ -64,10 +107,7 @@ class HubSpotService:
                 params["after"] = after
             
             # Make API request
-            response = await self.client.get(
-                "/crm/v3/objects/contacts",
-                params=params
-            )
+            response = await self._make_request_with_retry("GET", "/crm/v3/objects/contacts", params=params)
             
             if response.status_code == 200:
                 data = response.json()
@@ -77,9 +117,6 @@ class HubSpotService:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
                 
-        except httpx.RequestError as e:
-            logger.error(f"HubSpot API request failed: {str(e)}")
-            raise
         except Exception as e:
             logger.error(f"Failed to get contacts: {str(e)}")
             raise
@@ -110,10 +147,7 @@ class HubSpotService:
                 params["after"] = after
             
             # Make API request
-            response = await self.client.get(
-                "/crm/v3/objects/deals",
-                params=params
-            )
+            response = await self._make_request_with_retry("GET", "/crm/v3/objects/deals", params=params)
             
             if response.status_code == 200:
                 data = response.json()
@@ -123,9 +157,6 @@ class HubSpotService:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
                 
-        except httpx.RequestError as e:
-            logger.error(f"HubSpot API request failed: {str(e)}")
-            raise
         except Exception as e:
             logger.error(f"Failed to get deals: {str(e)}")
             raise
@@ -157,10 +188,7 @@ class HubSpotService:
                 params["after"] = after
             
             # Make API request
-            response = await self.client.get(
-                "/crm/v3/objects/companies",
-                params=params
-            )
+            response = await self._make_request_with_retry("GET", "/crm/v3/objects/companies", params=params)
             
             if response.status_code == 200:
                 data = response.json()
@@ -170,9 +198,6 @@ class HubSpotService:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
                 
-        except httpx.RequestError as e:
-            logger.error(f"HubSpot API request failed: {str(e)}")
-            raise
         except Exception as e:
             logger.error(f"Failed to get companies: {str(e)}")
             raise
@@ -189,10 +214,7 @@ class HubSpotService:
             }
             
             # Make API request
-            response = await self.client.post(
-                "/crm/v3/objects/contacts",
-                json=formatted_data
-            )
+            response = await self._make_request_with_retry("POST", "/crm/v3/objects/contacts", json=formatted_data)
             
             if response.status_code == 201:
                 data = response.json()
@@ -209,10 +231,7 @@ class HubSpotService:
                         logger.info(f"Found existing contact ID: {existing_id}")
                         
                         # Get the existing contact details
-                        get_response = await self.client.get(
-                            f"/crm/v3/objects/contacts/{existing_id}",
-                            params={"properties": "firstname,lastname,email,phone,company,jobtitle,industry,lifecyclestage"}
-                        )
+                        get_response = await self._make_request_with_retry("GET", f"/crm/v3/objects/contacts/{existing_id}", params={"properties": "firstname,lastname,email,phone,company,jobtitle,industry,lifecyclestage"})
                         
                         if get_response.status_code == 200:
                             existing_contact = get_response.json()
@@ -251,9 +270,6 @@ class HubSpotService:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
                 
-        except httpx.RequestError as e:
-            logger.error(f"HubSpot API request failed: {str(e)}")
-            raise
         except Exception as e:
             logger.error(f"Failed to create contact: {str(e)}")
             raise
@@ -270,10 +286,7 @@ class HubSpotService:
             }
             
             # Make API request
-            response = await self.client.patch(
-                f"/crm/v3/objects/contacts/{contact_id}",
-                json=formatted_data
-            )
+            response = await self._make_request_with_retry("PATCH", f"/crm/v3/objects/contacts/{contact_id}", json=formatted_data)
             
             if response.status_code == 200:
                 data = response.json()
@@ -283,9 +296,6 @@ class HubSpotService:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
                 
-        except httpx.RequestError as e:
-            logger.error(f"HubSpot API request failed: {str(e)}")
-            raise
         except Exception as e:
             logger.error(f"Failed to update contact: {str(e)}")
             raise
@@ -302,10 +312,7 @@ class HubSpotService:
             }
             
             # Make API request
-            response = await self.client.post(
-                "/crm/v3/objects/deals",
-                json=formatted_data
-            )
+            response = await self._make_request_with_retry("POST", "/crm/v3/objects/deals", json=formatted_data)
             
             if response.status_code == 201:
                 data = response.json()
@@ -315,9 +322,6 @@ class HubSpotService:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
                 
-        except httpx.RequestError as e:
-            logger.error(f"HubSpot API request failed: {str(e)}")
-            raise
         except Exception as e:
             logger.error(f"Failed to create deal: {str(e)}")
             raise
@@ -339,10 +343,7 @@ class HubSpotService:
             }
             
             # Make API request
-            response = await self.client.post(
-                "/crm/v3/objects/contacts/search",
-                json=search_data
-            )
+            response = await self._make_request_with_retry("POST", "/crm/v3/objects/contacts/search", json=search_data)
             
             if response.status_code == 200:
                 data = response.json()
@@ -352,9 +353,6 @@ class HubSpotService:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
                 
-        except httpx.RequestError as e:
-            logger.error(f"HubSpot API request failed: {str(e)}")
-            raise
         except Exception as e:
             logger.error(f"Failed to search contacts: {str(e)}")
             raise
@@ -385,10 +383,7 @@ class HubSpotService:
             }
             
             # Make API request
-            response = await self.client.post(
-                "/crm/v3/objects/contacts/search",
-                json=search_data
-            )
+            response = await self._make_request_with_retry("POST", "/crm/v3/objects/contacts/search", json=search_data)
             
             if response.status_code == 200:
                 data = response.json()
@@ -403,9 +398,6 @@ class HubSpotService:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
                 
-        except httpx.RequestError as e:
-            logger.error(f"HubSpot API request failed: {str(e)}")
-            raise
         except Exception as e:
             logger.error(f"Failed to get contact by email: {str(e)}")
             raise

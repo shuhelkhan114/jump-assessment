@@ -652,18 +652,21 @@ def _create_company_text_for_embedding(company: HubspotCompany) -> str:
     if company.industry:
         parts.append(f"Industry: {company.industry}")
     
+    # Add type
+    if company.type:
+        parts.append(f"Type: {company.type}")
+    
     # Add description
     if company.description:
-        parts.append(f"Description: {company.description}")
+        # Truncate very long descriptions
+        description = company.description[:1000] if len(company.description) > 1000 else company.description
+        parts.append(f"Description: {description}")
     
-    # Add size and revenue
-    if company.num_employees:
-        parts.append(f"Employees: {company.num_employees}")
+    # Add contact info
+    if company.phone:
+        parts.append(f"Phone: {company.phone}")
     
-    if company.annualrevenue:
-        parts.append(f"Annual Revenue: ${company.annualrevenue}")
-    
-    # Add location
+    # Add location info
     location_parts = []
     if company.city:
         location_parts.append(company.city)
@@ -671,8 +674,72 @@ def _create_company_text_for_embedding(company: HubspotCompany) -> str:
         location_parts.append(company.state)
     if company.country:
         location_parts.append(company.country)
-    
     if location_parts:
         parts.append(f"Location: {', '.join(location_parts)}")
     
-    return "\n".join(parts) 
+    # Add financial info
+    if company.num_employees:
+        parts.append(f"Employees: {company.num_employees}")
+    if company.annualrevenue:
+        parts.append(f"Annual Revenue: ${company.annualrevenue:,.2f}")
+    
+    return "\n".join(parts)
+
+@celery_app.task(bind=True, max_retries=3)
+def sync_all_users_hubspot(self):
+    """Sync HubSpot data for all users with HubSpot OAuth"""
+    try:
+        logger.info("Starting HubSpot sync for all users")
+        
+        # Run sync function
+        result = _sync_all_users_hubspot_sync()
+        
+        logger.info(f"All users HubSpot sync completed: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"All users HubSpot sync failed: {str(e)}")
+        
+        # Retry with exponential backoff
+        if self.request.retries < self.max_retries:
+            retry_delay = 2 ** self.request.retries
+            raise self.retry(countdown=retry_delay, exc=e)
+        else:
+            raise e
+
+def _sync_all_users_hubspot_sync() -> Dict[str, Any]:
+    """Sync implementation of syncing all users' HubSpot data"""
+    with SyncSessionLocal() as session:
+        # Get all users with HubSpot OAuth tokens
+        result = session.execute(
+            select(User).where(User.hubspot_access_token.is_not(None))
+        )
+        users = result.scalars().all()
+        
+        sync_results = []
+        
+        for user in users:
+            try:
+                # Schedule individual sync for all HubSpot data
+                sync_result = sync_all_hubspot_data.delay(user.id)
+                sync_results.append({
+                    "user_id": user.id,
+                    "task_id": sync_result.id,
+                    "status": "scheduled"
+                })
+                
+            except Exception as e:
+                logger.error(f"Failed to schedule HubSpot sync for user {user.id}: {str(e)}")
+                sync_results.append({
+                    "user_id": user.id,
+                    "status": "failed",
+                    "error": str(e)
+                })
+        
+        return {
+            "total_users": len(users),
+            "scheduled_syncs": len([r for r in sync_results if r["status"] == "scheduled"]),
+            "failed_syncs": len([r for r in sync_results if r["status"] == "failed"]),
+            "sync_results": sync_results,
+            "synced_at": datetime.utcnow().isoformat()
+        } 

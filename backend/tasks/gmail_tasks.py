@@ -60,12 +60,22 @@ def _sync_gmail_emails_sync(user_id: str, days_back: int = 30) -> Dict[str, Any]
         if not user.google_access_token:
             raise Exception(f"User {user_id} has no Google access token")
         
-        # Initialize Gmail service
-        if not gmail_service.initialize_service(
-            user.google_access_token,
-            user.google_refresh_token or ""
-        ):
-            raise Exception("Failed to initialize Gmail service")
+        # Initialize Gmail service with enhanced token refresh
+        try:
+            if not gmail_service.initialize_service(
+                user.google_access_token,
+                user.google_refresh_token or "",
+                user_id=user_id,
+                token_update_callback=update_user_google_tokens
+            ):
+                # More specific error handling
+                if not user.google_refresh_token:
+                    raise Exception(f"Gmail service initialization failed for user {user_id}: Missing refresh token. Please reconnect your Google account.")
+                else:
+                    raise Exception(f"Gmail service initialization failed for user {user_id}: Token may be expired or invalid. Please reconnect your Google account.")
+        except Exception as init_error:
+            logger.error(f"Gmail service initialization error for user {user_id}: {str(init_error)}")
+            raise Exception(f"Failed to initialize Gmail service for user {user_id}: {str(init_error)}")
         
         # Get existing Gmail IDs to avoid duplicates
         existing_result = session.execute(
@@ -73,20 +83,30 @@ def _sync_gmail_emails_sync(user_id: str, days_back: int = 30) -> Dict[str, Any]
         )
         existing_gmail_ids = {row[0] for row in existing_result.fetchall()}
         
-        # Fetch messages from Gmail (using asyncio.run for the async service call)
-        messages = asyncio.run(gmail_service.list_messages(days_back=days_back))
+        try:
+            # Fetch messages from Gmail (using asyncio.run for the async service call)
+            messages = asyncio.run(gmail_service.list_messages(days_back=days_back))
+            
+            # Also fetch the latest 200 messages without date filtering to ensure we don't miss any
+            if days_back <= 7:  # Only for recent syncs to avoid too much processing
+                latest_messages = asyncio.run(gmail_service.list_latest_messages(max_results=200))
+                
+                # Combine and deduplicate messages
+                all_message_ids = {msg['id'] for msg in messages}
+                for msg in latest_messages:
+                    if msg['id'] not in all_message_ids:
+                        messages.append(msg)
+                
+                logger.info(f"Combined sync: {len(messages)} total messages (including latest without date filter)")
         
-        # Also fetch the latest 200 messages without date filtering to ensure we don't miss any
-        if days_back <= 7:  # Only for recent syncs to avoid too much processing
-            latest_messages = asyncio.run(gmail_service.list_latest_messages(max_results=200))
-            
-            # Combine and deduplicate messages
-            all_message_ids = {msg['id'] for msg in messages}
-            for msg in latest_messages:
-                if msg['id'] not in all_message_ids:
-                    messages.append(msg)
-            
-            logger.info(f"Combined sync: {len(messages)} total messages (including latest without date filter)")
+        except Exception as api_error:
+            # Check if this is a token-related error
+            if "invalid_grant" in str(api_error).lower() or "unauthorized" in str(api_error).lower():
+                logger.error(f"Google API authentication error for user {user_id}: {str(api_error)}")
+                raise Exception(f"Google authentication expired for user {user_id}. Please reconnect your Google account.")
+            else:
+                logger.error(f"Google API error for user {user_id}: {str(api_error)}")
+                raise Exception(f"Failed to fetch emails from Gmail for user {user_id}: {str(api_error)}")
         
         new_emails = []
         processed_count = 0
@@ -327,20 +347,54 @@ def _send_email_sync(user_id: str, to: str, subject: str, body: str, cc: str = N
         if not user.google_access_token:
             raise Exception(f"User {user_id} has no Google access token")
         
-        # Initialize Gmail service
+        # Initialize Gmail service with enhanced token refresh
         if not gmail_service.initialize_service(
             user.google_access_token,
-            user.google_refresh_token or ""
+            user.google_refresh_token or "",
+            user_id=user_id,
+            token_update_callback=update_user_google_tokens
         ):
-            raise Exception("Failed to initialize Gmail service")
+            raise Exception(f"Failed to initialize Gmail service for user {user_id}")
         
-        # Send email (using asyncio.run for the async service call)
-        result = asyncio.run(gmail_service.send_email(to, subject, body, cc))
+        try:
+            # Send email (using asyncio.run for the async service call)
+            result = asyncio.run(gmail_service.send_email(to, subject, body, cc))
+            
+            return {
+                "user_id": user_id,
+                "to": to,
+                "subject": subject,
+                "message_id": result.get('id'),
+                "sent_at": datetime.utcnow().isoformat()
+            }
         
-        return {
-            "user_id": user_id,
-            "to": to,
-            "subject": subject,
-            "message_id": result.get('id'),
-            "sent_at": datetime.utcnow().isoformat()
-        } 
+        except Exception as send_error:
+            # Check if this is a token-related error
+            if "invalid_grant" in str(send_error).lower() or "unauthorized" in str(send_error).lower():
+                logger.error(f"Google API authentication error while sending email for user {user_id}: {str(send_error)}")
+                raise Exception(f"Google authentication expired for user {user_id}. Please reconnect your Google account.")
+            else:
+                logger.error(f"Failed to send email for user {user_id}: {str(send_error)}")
+                raise Exception(f"Failed to send email: {str(send_error)}")
+
+def update_user_google_tokens(user_id: str, access_token: str, refresh_token: str, expires_at: datetime):
+    """Update user's Google tokens in database"""
+    try:
+        with SyncSessionLocal() as session:
+            result = session.execute(select(User).where(User.id == user_id))
+            user = result.scalar_one_or_none()
+            
+            if user:
+                user.google_access_token = access_token
+                if refresh_token:  # Only update if we have a new refresh token
+                    user.google_refresh_token = refresh_token
+                user.google_token_expires_at = expires_at
+                user.updated_at = datetime.utcnow()
+                
+                session.commit()
+                logger.info(f"Successfully updated Google tokens for user {user_id}")
+            else:
+                logger.error(f"User {user_id} not found when updating Google tokens")
+    except Exception as e:
+        logger.error(f"Failed to update Google tokens for user {user_id}: {str(e)}")
+        raise 

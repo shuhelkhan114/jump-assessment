@@ -86,6 +86,18 @@ async def google_callback(code: str, state: str):
         credentials = flow.credentials
         id_info = await verify_google_token(credentials.id_token)
         
+        # Detailed debugging of credentials object
+        print(f"=== GOOGLE CREDENTIALS DEBUG ===")
+        print(f"credentials.token: {bool(credentials.token)} (length: {len(credentials.token) if credentials.token else 0})")
+        print(f"credentials.refresh_token: {bool(credentials.refresh_token)} (length: {len(credentials.refresh_token) if credentials.refresh_token else 0})")
+        print(f"credentials.expired: {credentials.expired}")
+        print(f"credentials.expiry: {credentials.expiry}")
+        print(f"credentials object type: {type(credentials)}")
+        if credentials.refresh_token:
+            print(f"Refresh token preview: {credentials.refresh_token[:20]}...")
+        else:
+            print("❌ NO REFRESH TOKEN PROVIDED BY GOOGLE")
+        
         # Create or update user
         tokens = {
             "access_token": credentials.token,
@@ -95,6 +107,7 @@ async def google_callback(code: str, state: str):
         
         # Debug logging for refresh token  
         logger.info(f"Google OAuth callback tokens - Access token: {bool(tokens['access_token'])}, Refresh token: {bool(tokens['refresh_token'])}")
+        print(f"Final tokens dict - Access: {bool(tokens['access_token'])}, Refresh: {bool(tokens['refresh_token'])}")
         
         user = await create_user_from_google(id_info, tokens)
         

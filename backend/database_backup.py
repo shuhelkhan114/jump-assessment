@@ -47,7 +47,6 @@ class User(Base):
     
     # Relationships
     emails = relationship("Email", back_populates="user")
-    chat_sessions = relationship("ChatSession", back_populates="user")
     conversations = relationship("Conversation", back_populates="user")
     ongoing_instructions = relationship("OngoingInstruction", back_populates="user")
     hubspot_contacts = relationship("HubspotContact", back_populates="user")
@@ -103,7 +102,7 @@ class HubspotContact(Base):
     embedding = Column(Vector(1536), nullable=True)
     
     # Relationships
-    user = relationship("User", back_populates="hubspot_contacts")
+    user = relationship("User")
     deals = relationship("HubspotDeal", back_populates="contact")
 
 class HubspotDeal(Base):
@@ -133,7 +132,7 @@ class HubspotDeal(Base):
     embedding = Column(Vector(1536), nullable=True)
     
     # Relationships
-    user = relationship("User", back_populates="hubspot_deals")
+    user = relationship("User")
     contact = relationship("HubspotContact", back_populates="deals")
     company = relationship("HubspotCompany", back_populates="deals")
 
@@ -164,30 +163,15 @@ class HubspotCompany(Base):
     
     # Vector embedding for RAG
     embedding = Column(Vector(1536), nullable=True)
-    
     # Relationships
-    user = relationship("User", back_populates="hubspot_companies")
+    user = relationship("User")
     deals = relationship("HubspotDeal", back_populates="company")
-
-class ChatSession(Base):
-    __tablename__ = "chat_sessions"
-    
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
-    title = Column(String, nullable=True)  # Auto-generated or user-set title
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relationships
-    user = relationship("User", back_populates="chat_sessions")
-    conversations = relationship("Conversation", back_populates="chat_session", order_by="Conversation.created_at")
 
 class Conversation(Base):
     __tablename__ = "conversations"
     
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
-    chat_session_id = Column(String, ForeignKey("chat_sessions.id"), nullable=False)
     message = Column(Text, nullable=False)
     response = Column(Text, nullable=False)
     context_used = Column(Text, nullable=True)  # RAG context
@@ -195,7 +179,6 @@ class Conversation(Base):
     
     # Relationships
     user = relationship("User", back_populates="conversations")
-    chat_session = relationship("ChatSession", back_populates="conversations")
 
 class OngoingInstruction(Base):
     __tablename__ = "ongoing_instructions"

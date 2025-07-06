@@ -25,19 +25,26 @@ class GmailService:
     def __init__(self):
         self.service = None
         self.credentials = None
+        self.user_id = None  # Track user ID for token updates
+        self.token_update_callback = None  # Callback to update tokens in database
     
-    def initialize_service(self, access_token: str, refresh_token: str) -> bool:
+    def initialize_service(self, access_token: str, refresh_token: str, user_id: str = None, token_update_callback = None) -> bool:
         """Initialize Gmail service with OAuth credentials"""
         try:
+            # Store user context for token updates
+            self.user_id = user_id
+            self.token_update_callback = token_update_callback
+            
             # Check if refresh token is missing
             if not refresh_token or refresh_token.strip() == "":
-                logger.error("Google refresh token is missing or empty")
-                raise Exception("Google refresh token is missing. Please reconnect your Google account.")
-            
+                logger.warning(f"Google refresh token is missing for user {user_id} - service will have limited functionality")
+                # Don't fail completely, but log the issue
+                # We can still attempt to use the access token if it's valid
+                
             # Create credentials object
             self.credentials = Credentials(
                 token=access_token,
-                refresh_token=refresh_token,
+                refresh_token=refresh_token if refresh_token and refresh_token.strip() else None,
                 token_uri="https://oauth2.googleapis.com/token",
                 client_id=os.getenv("GOOGLE_CLIENT_ID"),
                 client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
@@ -49,25 +56,59 @@ class GmailService:
                 ]
             )
             
-            # Refresh token if needed
-            if self.credentials.expired:
+            # Check if token needs refresh (if expired or expiring soon)
+            needs_refresh = self.credentials.expired
+            if not needs_refresh and self.credentials.expiry:
+                # Refresh if token expires within 10 minutes
+                from datetime import datetime, timezone, timedelta
+                ten_minutes_from_now = datetime.now(timezone.utc) + timedelta(minutes=10)
+                needs_refresh = self.credentials.expiry <= ten_minutes_from_now
+            
+            # Try to refresh token if needed and we have a refresh token
+            if needs_refresh and refresh_token and refresh_token.strip():
                 try:
-                    logger.info("Google token expired, attempting refresh...")
+                    logger.info(f"Google token needs refresh for user {user_id}, attempting refresh...")
+                    old_token = self.credentials.token
                     self.credentials.refresh(Request())
-                    logger.info("Google token refreshed successfully")
+                    logger.info(f"Google token refreshed successfully for user {user_id}")
+                    
+                    # Save updated tokens to database if callback provided
+                    if self.token_update_callback and self.credentials.token != old_token:
+                        try:
+                            self.token_update_callback(
+                                user_id,
+                                self.credentials.token,
+                                self.credentials.refresh_token,
+                                self.credentials.expiry
+                            )
+                            logger.info(f"Updated tokens saved to database for user {user_id}")
+                        except Exception as save_error:
+                            logger.error(f"Failed to save updated tokens for user {user_id}: {str(save_error)}")
+                    
                 except Exception as refresh_error:
-                    logger.error(f"Failed to refresh Google token: {str(refresh_error)}")
-                    raise Exception("Google token refresh failed. Please reconnect your Google account.")
+                    logger.error(f"Failed to refresh Google token for user {user_id}: {str(refresh_error)}")
+                    # Don't fail completely - the access token might still be valid
+                    logger.warning(f"Continuing with existing access token for user {user_id} despite refresh failure")
+            elif needs_refresh and not refresh_token:
+                logger.error(f"Google token is expired for user {user_id} and no refresh token available - user needs to reauthenticate")
+                return False
             
             # Build Gmail and Calendar services
-            self.service = build('gmail', 'v1', credentials=self.credentials)
-            self.calendar_service = build('calendar', 'v3', credentials=self.credentials)
-            
-            logger.info("Gmail and Calendar services initialized successfully")
-            return True
+            try:
+                self.service = build('gmail', 'v1', credentials=self.credentials)
+                self.calendar_service = build('calendar', 'v3', credentials=self.credentials)
+                
+                # Test the service with a simple call
+                profile = self.service.users().getProfile(userId='me').execute()
+                logger.info(f"Gmail service initialized successfully for user {user_id}: {profile.get('emailAddress', 'unknown')}")
+                return True
+                
+            except Exception as service_error:
+                logger.error(f"Failed to build Gmail/Calendar services for user {user_id}: {str(service_error)}")
+                return False
             
         except Exception as e:
-            logger.error(f"Failed to initialize Gmail service: {str(e)}")
+            logger.error(f"Failed to initialize Gmail service for user {user_id}: {str(e)}")
             return False
     
     async def list_messages(self, days_back: int = 30, max_results: int = 500) -> List[Dict[str, Any]]:

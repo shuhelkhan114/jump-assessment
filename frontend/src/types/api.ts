@@ -34,10 +34,19 @@ export interface ChatResponse {
   response: string;
   context_used?: string;
   sources?: Array<{
-    type: string;
+    id: string;
     content: string;
+    source_type: string;
     metadata?: Record<string, any>;
   }>;
+  tool_results?: ToolResult[];
+}
+
+export interface ToolResult {
+  tool: string;
+  status: 'success' | 'error';
+  result?: any;
+  error?: string;
 }
 
 export interface ConversationHistory {
@@ -102,4 +111,45 @@ export interface ApiResponse<T> {
 export interface ApiError {
   detail: string;
   status_code: number;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: string;
+  user: User;
+}
+
+export interface GoogleAuthResponse {
+  access_token: string;
+  user: User;
+}
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface CreateChatSessionRequest {
+  title?: string;
+}
+
+export interface UpdateChatSessionRequest {
+  title: string;
+}
+
+export interface IntegrationStatus {
+  google: boolean;
+  hubspot: boolean;
+}
+
+export interface HubSpotContact {
+  id: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  company?: string;
 } 

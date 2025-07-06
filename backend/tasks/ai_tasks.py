@@ -98,6 +98,7 @@ def _execute_create_calendar_event(user_id: str, action_data: dict) -> dict:
     from sqlalchemy.orm import sessionmaker
     from database import User
     from services.gmail_service import gmail_service
+    from tasks.gmail_tasks import update_user_google_tokens
     from config import get_settings
     import asyncio
     
@@ -135,39 +136,51 @@ def _execute_create_calendar_event(user_id: str, action_data: dict) -> dict:
             if not user.google_refresh_token:
                 raise Exception("Google refresh token is missing. Please reconnect your Google account to create calendar events.")
             
-            # Initialize Gmail service with Calendar support
+            # Initialize Gmail service with enhanced token refresh and Calendar support
             if not gmail_service.initialize_service(
                 user.google_access_token,
-                user.google_refresh_token
+                user.google_refresh_token,
+                user_id=user_id,
+                token_update_callback=update_user_google_tokens
             ):
                 raise Exception("Failed to initialize Gmail/Calendar service")
             
-            # Create calendar event
-            calendar_result = asyncio.run(gmail_service.create_calendar_event(
-                title=title,
-                start_datetime=start_datetime,
-                end_datetime=end_datetime,
-                description=description,
-                attendees=attendees,
-                location=location
-            ))
-            
-            logger.info(f"Calendar event '{title}' created successfully with ID: {calendar_result.get('id')}")
-            
-            return {
-                "action": "create_calendar_event",
-                "status": "success",
-                "message": f"Calendar event '{title}' created successfully",
-                "details": {
-                    "id": calendar_result.get("id"),
-                    "title": title,
-                    "start": start_datetime,
-                    "end": end_datetime,
-                    "attendees": attendees,
-                    "location": location,
-                    "link": calendar_result.get("htmlLink", "")
+            try:
+                # Create calendar event
+                calendar_result = asyncio.run(gmail_service.create_calendar_event(
+                    title=title,
+                    start_datetime=start_datetime,
+                    end_datetime=end_datetime,
+                    description=description,
+                    attendees=attendees,
+                    location=location
+                ))
+                
+                logger.info(f"Calendar event '{title}' created successfully with ID: {calendar_result.get('id')}")
+                
+                return {
+                    "action": "create_calendar_event",
+                    "status": "success",
+                    "message": f"Calendar event '{title}' created successfully",
+                    "details": {
+                        "id": calendar_result.get("id"),
+                        "title": title,
+                        "start": start_datetime,
+                        "end": end_datetime,
+                        "attendees": attendees,
+                        "location": location,
+                        "link": calendar_result.get("htmlLink", "")
+                    }
                 }
-            }
+            
+            except Exception as api_error:
+                # Check if this is a token-related error
+                if "invalid_grant" in str(api_error).lower() or "unauthorized" in str(api_error).lower():
+                    logger.error(f"Google API authentication error while creating calendar event for user {user_id}: {str(api_error)}")
+                    raise Exception(f"Google authentication expired for user {user_id}. Please reconnect your Google account.")
+                else:
+                    logger.error(f"Failed to create calendar event for user {user_id}: {str(api_error)}")
+                    raise Exception(f"Failed to create calendar event: {str(api_error)}")
         
     except Exception as e:
         logger.error(f"Failed to create calendar event: {str(e)}")

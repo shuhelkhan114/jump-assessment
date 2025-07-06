@@ -1,5 +1,9 @@
 version: '3.8'
 
+networks:
+  default:
+    driver: bridge
+
 services:
   db:
     image: pgvector/pgvector:pg15
@@ -16,6 +20,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   backend:
     build: ./backend
@@ -38,6 +45,9 @@ services:
     volumes:
       - ./backend:/app
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   frontend:
     build: ./frontend
@@ -51,6 +61,9 @@ services:
       - ./frontend:/app
       - /app/node_modules
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   redis:
     image: redis:7-alpine
@@ -60,6 +73,9 @@ services:
       - redis_data:/data
     restart: unless-stopped
     command: redis-server --appendonly yes
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   celery_worker:
     build: ./backend
@@ -79,6 +95,9 @@ services:
       - ./backend:/app
     command: celery -A celery_app worker --loglevel=info
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
   celery_beat:
     build: ./backend
@@ -98,6 +117,9 @@ services:
       - ./backend:/app
     command: celery -A celery_app beat --loglevel=info
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
 
 volumes:
   postgres_data:
