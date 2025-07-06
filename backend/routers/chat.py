@@ -363,7 +363,7 @@ async def send_message_to_session(
         await update_session_timestamp(session_id)
         
         # Auto-generate title if this is the first message in session
-        if not chat_session.title and len(conversation_history) == 0:
+        if (not chat_session.title or chat_session.title == "New Chat") and len(conversation_history) == 0:
             await auto_generate_session_title(session_id, chat_message.message)
         
         logger.info(f"Generated chat response for user {current_user['id']} in session {session_id}")
@@ -960,10 +960,27 @@ async def update_session_timestamp(session_id: str):
 async def auto_generate_session_title(session_id: str, first_message: str):
     """Auto-generate a title for the session based on the first message"""
     try:
-        # Use first few words of the message as title, max 50 characters
-        title = first_message.strip()[:50]
-        if len(first_message) > 50:
-            title += "..."
+        # Clean and truncate the message for a title
+        cleaned_message = first_message.strip()
+        
+        # If message is short enough, use it as is
+        if len(cleaned_message) <= 50:
+            title = cleaned_message
+        else:
+            # Truncate at word boundary within 50 characters
+            words = cleaned_message.split()
+            title = ""
+            for word in words:
+                if len(title + " " + word) <= 47:  # Leave room for "..."
+                    title = title + " " + word if title else word
+                else:
+                    break
+            if title != cleaned_message:
+                title += "..."
+        
+        # Ensure we have a title (fallback if something goes wrong)
+        if not title:
+            title = "New Chat"
         
         async with AsyncSessionLocal() as session:
             result = await session.execute(

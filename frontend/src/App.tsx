@@ -6,6 +6,7 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { Navbar } from './components/Navbar';
 import { LoginPage } from './pages/LoginPage';
 import { ChatPage } from './pages/ChatPage';
+import { HistoryPage } from './pages/HistoryPage';
 import { AuthCallback } from './pages/AuthCallback';
 
 import './index.css';
@@ -55,6 +56,16 @@ function App(): JSX.Element {
                 </ProtectedRoute>
               } />
               
+              <Route path="/history" element={
+                <ProtectedRoute>
+                  <div className="flex flex-col h-screen">
+                    <Navbar />
+                    <main className="flex-1 overflow-y-auto">
+                      <HistoryPage />
+                    </main>
+                  </div>
+                </ProtectedRoute>
+              } />
 
             </Routes>
           </div>

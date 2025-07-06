@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { ChatResponse, ConversationHistory, ToolResult } from '../types/api';
-import { ChatSidebar } from '../components/ChatSidebar';
 
 // Enhanced message type to include tool results
 interface ChatMessage {
@@ -89,7 +89,7 @@ const HubSpotIntegration: React.FC = () => {
 
   const checkIntegrationStatus = async () => {
     try {
-      const response = await fetch('/integrations/status', {
+      const response = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/integrations/status`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
         }
@@ -106,7 +106,7 @@ const HubSpotIntegration: React.FC = () => {
   const handleConnect = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch('/integrations/hubspot/auth-url', {
+      const response = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/integrations/hubspot/auth-url`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
         }
@@ -157,31 +157,60 @@ export const ChatPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isLoadingSession, setIsLoadingSession] = useState(false);
+  const [sessionTitle, setSessionTitle] = useState<string>('');
+  const [isCreatingNewSession, setIsCreatingNewSession] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
 
   // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
+  // Load session from URL parameters
+  useEffect(() => {
+    const sessionId = searchParams.get('session');
+    if (sessionId && sessionId !== currentSessionId) {
+      setCurrentSessionId(sessionId);
+    }
+  }, [searchParams, currentSessionId]);
+
   // Load conversation history when session changes
   useEffect(() => {
-    if (currentSessionId) {
+    if (currentSessionId && !isCreatingNewSession) {
       loadSessionHistory(currentSessionId);
+    } else if (!currentSessionId) {
+      // Clear messages if no session
+      setMessages([]);
+      setSessionTitle('');
     }
-  }, [currentSessionId]);
+  }, [currentSessionId, isCreatingNewSession]);
 
   const loadSessionHistory = async (sessionId: string) => {
     setIsLoadingSession(true);
     try {
-      const response = await fetch(`/chat/sessions/${sessionId}/history`, {
+      // Load session details
+      const sessionResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
         }
       });
 
-      if (response.ok) {
-        const history: ConversationHistory[] = await response.json();
+      if (sessionResponse.ok) {
+        const session = await sessionResponse.json();
+        setSessionTitle(session.title);
+      }
+
+      // Load session history
+      const historyResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}/history`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+
+      if (historyResponse.ok) {
+        const history: ConversationHistory[] = await historyResponse.json();
         const formattedMessages: ChatMessage[] = history.reverse().flatMap(conv => [
           { role: 'user' as const, content: conv.message },
           { role: 'assistant' as const, content: conv.response }
@@ -197,7 +226,7 @@ export const ChatPage: React.FC = () => {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputMessage.trim() || !currentSessionId) return;
+    if (!inputMessage.trim()) return;
 
     const userMessage = inputMessage.trim();
     setInputMessage('');
@@ -205,8 +234,38 @@ export const ChatPage: React.FC = () => {
     setIsLoading(true);
 
     try {
-      // Call session-specific message endpoint
-      const response = await fetch(`/chat/sessions/${currentSessionId}/message`, {
+      let sessionId = currentSessionId;
+      let isNewSession = false;
+      
+      // If no session exists, create one first
+      if (!sessionId) {
+        setIsCreatingNewSession(true);
+        isNewSession = true;
+        
+        const sessionResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          },
+          body: JSON.stringify({})
+        });
+
+        if (sessionResponse.ok) {
+          const newSession = await sessionResponse.json();
+          sessionId = newSession.id;
+          setCurrentSessionId(sessionId);
+          setSessionTitle(newSession.title || 'New Chat');
+          
+          // Update URL to include the new session ID
+          navigate(`/chat?session=${sessionId}`, { replace: true });
+        } else {
+          throw new Error('Failed to create chat session');
+        }
+      }
+
+      // Send message to the session
+      const response = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}/message`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -222,84 +281,57 @@ export const ChatPage: React.FC = () => {
           content: data.response,
           tool_results: data.tool_results 
         }]);
+
+        // If this was the first message (creating a new session), refresh the session title
+        if (isNewSession) {
+          try {
+            const sessionResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}`, {
+              headers: {
+                'Authorization': `Bearer ${localStorage.getItem('token')}`
+              }
+            });
+            if (sessionResponse.ok) {
+              const session = await sessionResponse.json();
+              setSessionTitle(session.title);
+            }
+          } catch (error) {
+            console.error('Failed to refresh session title:', error);
+          }
+          // Reset the creating new session flag
+          setIsCreatingNewSession(false);
+        }
       } else {
         setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error. Please try again.' }]);
       }
     } catch (error) {
+      console.error('Error sending message:', error);
       setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error. Please try again.' }]);
+      // Reset the creating new session flag in case of error
+      setIsCreatingNewSession(false);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleSessionSelect = (sessionId: string) => {
-    setCurrentSessionId(sessionId);
-  };
 
-  const handleNewChat = () => {
-    setMessages([]);
-    setCurrentSessionId(null);
-  };
-
-  const handleDeleteSession = (sessionId: string) => {
-    if (currentSessionId === sessionId) {
-      setMessages([]);
-      setCurrentSessionId(null);
-    }
-  };
-
-  const handleRenameSession = (sessionId: string, newTitle: string) => {
-    // Session title updated - no additional action needed for now
-    console.log(`Session ${sessionId} renamed to: ${newTitle}`);
-  };
-
-  const createNewSessionAndSelect = async () => {
-    try {
-      const response = await fetch('/chat/sessions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
-        body: JSON.stringify({})
-      });
-
-      if (response.ok) {
-        const newSession = await response.json();
-        setCurrentSessionId(newSession.id);
-        setMessages([]);
-      }
-    } catch (error) {
-      console.error('Failed to create new session:', error);
-    }
-  };
-
-  // Create initial session if none exists
-  useEffect(() => {
-    if (!currentSessionId) {
-      createNewSessionAndSelect();
-    }
-  }, []);
 
   return (
     <div className="flex h-full bg-white">
-      {/* Chat Sidebar */}
-      <ChatSidebar
-        currentSessionId={currentSessionId || undefined}
-        onSessionSelect={handleSessionSelect}
-        onNewChat={handleNewChat}
-        onDeleteSession={handleDeleteSession}
-        onRenameSession={handleRenameSession}
-      />
-
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col">
         {/* Chat Header */}
         <div className="border-b border-gray-200 p-4">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-semibold text-gray-900">AI Assistant</h1>
-              <p className="text-sm text-gray-600">Ask me about your clients, emails, or schedule meetings</p>
+              <h1 className="text-xl font-semibold text-gray-900">
+                {currentSessionId ? (sessionTitle || 'AI Assistant') : 'AI Assistant'}
+              </h1>
+              <p className="text-sm text-gray-600">
+                {currentSessionId 
+                  ? 'Ask me about your clients, emails, or schedule meetings'
+                  : 'Select a chat thread to start conversation'
+                }
+              </p>
             </div>
             <div className="flex items-center space-x-3">
               <HubSpotIntegration />
@@ -309,7 +341,22 @@ export const ChatPage: React.FC = () => {
 
         {/* Chat Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {isLoadingSession ? (
+          {!currentSessionId ? (
+            <div className="text-center py-8">
+              <p className="text-gray-500 mb-4">Ready to start a new conversation</p>
+              <p className="text-sm text-gray-400 mb-6">
+                Start typing below to begin your chat with the AI assistant
+              </p>
+              <div className="flex justify-center">
+                <button
+                  onClick={() => navigate('/history')}
+                  className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                >
+                  View History
+                </button>
+              </div>
+            </div>
+          ) : isLoadingSession ? (
             <div className="flex justify-center py-8">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary-600"></div>
             </div>
@@ -393,13 +440,13 @@ export const ChatPage: React.FC = () => {
               type="text"
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
-              placeholder={currentSessionId ? "Type your message..." : "Create a session to start chatting..."}
+              placeholder="Type your message..."
               className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-              disabled={isLoading || !currentSessionId}
+              disabled={isLoading}
             />
             <button
               type="submit"
-              disabled={isLoading || !inputMessage.trim() || !currentSessionId}
+              disabled={isLoading || !inputMessage.trim()}
               className="px-4 py-2 bg-primary-600 text-white rounded-md hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Send
