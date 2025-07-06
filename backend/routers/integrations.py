@@ -5,7 +5,7 @@ import structlog
 from datetime import datetime
 
 from auth import get_current_user, require_google_auth, require_hubspot_auth
-from database import AsyncSessionLocal, Email, HubspotContact, select
+from database import AsyncSessionLocal, Email, HubspotContact, HubspotDeal, HubspotCompany, select
 
 logger = structlog.get_logger()
 
@@ -108,24 +108,66 @@ async def get_gmail_task_status(
 
 @router.post("/hubspot/sync")
 async def sync_hubspot(
+    data_type: str = "all",  # "all", "contacts", "deals", "companies"
     current_user: dict = Depends(require_hubspot_auth)
 ):
     """Sync HubSpot data"""
     try:
-        if celery_app:
-            # Use Celery for background processing
-            task = celery_app.send_task("sync_hubspot_data", args=[current_user["id"]])
-            return {"message": "HubSpot sync started", "task_id": task.id}
-        else:
-            # Fallback to synchronous processing
-            await sync_hubspot_data(current_user["id"])
-            return {"message": "HubSpot sync completed"}
+        # Import HubSpot tasks
+        from tasks.hubspot_tasks import (
+            sync_all_hubspot_data, 
+            sync_hubspot_contacts, 
+            sync_hubspot_deals, 
+            sync_hubspot_companies
+        )
+        
+        # Start appropriate sync based on data type
+        if data_type == "contacts":
+            task = sync_hubspot_contacts.delay(current_user["id"])
+        elif data_type == "deals":
+            task = sync_hubspot_deals.delay(current_user["id"])
+        elif data_type == "companies":
+            task = sync_hubspot_companies.delay(current_user["id"])
+        else:  # "all" or default
+            task = sync_all_hubspot_data.delay(current_user["id"])
+        
+        return {
+            "message": f"HubSpot {data_type} sync started",
+            "task_id": task.id,
+            "data_type": data_type
+        }
         
     except Exception as e:
         logger.error(f"Failed to start HubSpot sync: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to start HubSpot sync"
+        )
+
+@router.get("/hubspot/task-status/{task_id}")
+async def get_hubspot_task_status(
+    task_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check HubSpot sync task status"""
+    try:
+        from celery.result import AsyncResult
+        
+        # Get task result
+        task_result = AsyncResult(task_id)
+        
+        return {
+            "task_id": task_id,
+            "status": task_result.status,
+            "result": task_result.result if task_result.ready() else None,
+            "info": task_result.info
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get HubSpot task status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get HubSpot task status"
         )
 
 @router.get("/gmail/emails")
@@ -174,8 +216,9 @@ async def get_contacts(
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(HubspotContact.id, HubspotContact.name, HubspotContact.email, 
-                      HubspotContact.phone, HubspotContact.company, HubspotContact.notes)
+                select(HubspotContact.id, HubspotContact.firstname, HubspotContact.lastname,
+                      HubspotContact.email, HubspotContact.phone, HubspotContact.company, 
+                      HubspotContact.jobtitle, HubspotContact.industry, HubspotContact.lifecyclestage)
                 .where(HubspotContact.user_id == current_user["id"])
                 .order_by(HubspotContact.created_at.desc())
                 .limit(limit)
@@ -185,11 +228,13 @@ async def get_contacts(
             return [
                 {
                     "id": contact.id,
-                    "name": contact.name,
+                    "name": f"{contact.firstname or ''} {contact.lastname or ''}".strip() or "Unknown",
                     "email": contact.email,
                     "phone": contact.phone,
                     "company": contact.company,
-                    "notes": contact.notes
+                    "jobtitle": contact.jobtitle,
+                    "industry": contact.industry,
+                    "lifecyclestage": contact.lifecyclestage
                 }
                 for contact in contacts
             ]
@@ -199,6 +244,84 @@ async def get_contacts(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch contacts"
+        )
+
+@router.get("/hubspot/deals")
+async def get_deals(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get HubSpot deals"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(HubspotDeal.id, HubspotDeal.dealname, HubspotDeal.amount,
+                      HubspotDeal.dealstage, HubspotDeal.pipeline, HubspotDeal.closedate,
+                      HubspotDeal.description)
+                .where(HubspotDeal.user_id == current_user["id"])
+                .order_by(HubspotDeal.created_at.desc())
+                .limit(limit)
+            )
+            deals = result.all()
+            
+            return [
+                {
+                    "id": deal.id,
+                    "dealname": deal.dealname,
+                    "amount": deal.amount,
+                    "dealstage": deal.dealstage,
+                    "pipeline": deal.pipeline,
+                    "closedate": deal.closedate.isoformat() if deal.closedate else None,
+                    "description": deal.description
+                }
+                for deal in deals
+            ]
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch deals: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch deals"
+        )
+
+@router.get("/hubspot/companies")
+async def get_companies(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get HubSpot companies"""
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(HubspotCompany.id, HubspotCompany.name, HubspotCompany.domain,
+                      HubspotCompany.industry, HubspotCompany.city, HubspotCompany.state,
+                      HubspotCompany.num_employees, HubspotCompany.annualrevenue,
+                      HubspotCompany.description)
+                .where(HubspotCompany.user_id == current_user["id"])
+                .order_by(HubspotCompany.created_at.desc())
+                .limit(limit)
+            )
+            companies = result.all()
+            
+            return [
+                {
+                    "id": company.id,
+                    "name": company.name,
+                    "domain": company.domain,
+                    "industry": company.industry,
+                    "location": f"{company.city or ''}, {company.state or ''}".strip(', '),
+                    "num_employees": company.num_employees,
+                    "annualrevenue": company.annualrevenue,
+                    "description": company.description
+                }
+                for company in companies
+            ]
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch companies: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch companies"
         )
 
 @router.get("/gmail/summary", response_model=EmailSummary)
