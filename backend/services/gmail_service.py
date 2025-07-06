@@ -39,7 +39,8 @@ class GmailService:
                 scopes=[
                     "https://www.googleapis.com/auth/gmail.readonly",
                     "https://www.googleapis.com/auth/gmail.modify",
-                    "https://www.googleapis.com/auth/gmail.compose"
+                    "https://www.googleapis.com/auth/gmail.compose",
+                    "https://www.googleapis.com/auth/calendar"
                 ]
             )
             
@@ -47,10 +48,11 @@ class GmailService:
             if self.credentials.expired:
                 self.credentials.refresh(Request())
             
-            # Build Gmail service
+            # Build Gmail and Calendar services
             self.service = build('gmail', 'v1', credentials=self.credentials)
+            self.calendar_service = build('calendar', 'v3', credentials=self.credentials)
             
-            logger.info("Gmail service initialized successfully")
+            logger.info("Gmail and Calendar services initialized successfully")
             return True
             
         except Exception as e:
@@ -373,6 +375,69 @@ class GmailService:
         except Exception as e:
             logger.error(f"Error cleaning email text: {str(e)}")
             return text
+    
+    async def create_calendar_event(
+        self, 
+        title: str, 
+        start_datetime: str, 
+        end_datetime: str,
+        description: str = "",
+        attendees: List[str] = None,
+        location: str = ""
+    ) -> Dict[str, Any]:
+        """Create a calendar event in Google Calendar"""
+        try:
+            if not self.calendar_service:
+                raise Exception("Calendar service not initialized")
+            
+            # Prepare event data
+            event = {
+                'summary': title,
+                'location': location,
+                'description': description,
+                'start': {
+                    'dateTime': start_datetime,
+                    'timeZone': 'UTC',
+                },
+                'end': {
+                    'dateTime': end_datetime,
+                    'timeZone': 'UTC',
+                },
+                'reminders': {
+                    'useDefault': False,
+                    'overrides': [
+                        {'method': 'email', 'minutes': 24 * 60},
+                        {'method': 'popup', 'minutes': 10},
+                    ],
+                },
+            }
+            
+            # Add attendees if provided
+            if attendees:
+                event['attendees'] = [{'email': email} for email in attendees]
+            
+            # Create the event
+            result = self.calendar_service.events().insert(
+                calendarId='primary',
+                body=event
+            ).execute()
+            
+            logger.info(f"Calendar event created successfully: {result.get('id')}")
+            
+            return {
+                'id': result.get('id'),
+                'htmlLink': result.get('htmlLink'),
+                'summary': result.get('summary'),
+                'start': result.get('start'),
+                'end': result.get('end'),
+                'attendees': result.get('attendees', []),
+                'location': result.get('location', ''),
+                'status': result.get('status')
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to create calendar event: {str(e)}")
+            raise e
 
 # Global service instance
 gmail_service = GmailService() 

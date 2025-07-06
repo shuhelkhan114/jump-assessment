@@ -163,7 +163,6 @@ class HubspotCompany(Base):
     
     # Vector embedding for RAG
     embedding = Column(Vector(1536), nullable=True)
-    
     # Relationships
     user = relationship("User")
     deals = relationship("HubspotDeal", back_populates="company")

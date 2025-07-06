@@ -148,7 +148,7 @@ def _sync_hubspot_contacts_sync(user_id: str) -> Dict[str, Any]:
             generate_hubspot_embeddings.delay(user_id, 'contacts', [contact.id for contact in new_contacts])
         
         # Close HubSpot service
-        asyncio.run(hubspot_service.close())
+        hubspot_service.close_sync()
         
         return {
             "user_id": user_id,
@@ -283,7 +283,7 @@ def _sync_hubspot_deals_sync(user_id: str) -> Dict[str, Any]:
             generate_hubspot_embeddings.delay(user_id, 'deals', [deal.id for deal in new_deals])
         
         # Close HubSpot service
-        asyncio.run(hubspot_service.close())
+        hubspot_service.close_sync()
         
         return {
             "user_id": user_id,
@@ -421,7 +421,7 @@ def _sync_hubspot_companies_sync(user_id: str) -> Dict[str, Any]:
             generate_hubspot_embeddings.delay(user_id, 'companies', [company.id for company in new_companies])
         
         # Close HubSpot service
-        asyncio.run(hubspot_service.close())
+        hubspot_service.close_sync()
         
         return {
             "user_id": user_id,

@@ -4,11 +4,14 @@ from typing import List, Optional, Dict, Any
 import structlog
 from datetime import datetime
 import uuid
+import json
 
 from auth import get_current_user
 from database import AsyncSessionLocal, Conversation, OngoingInstruction, select
 from services.openai_service import openai_service
 from services.rag_service import rag_service
+from services.tools_service import tools_service
+from tasks.ai_tasks import execute_ai_action
 
 logger = structlog.get_logger()
 
@@ -72,14 +75,81 @@ async def send_message(
         # Build system prompt
         system_prompt = build_system_prompt(ongoing_instructions)
         
-        # Generate response using OpenAI with RAG context
+        # Get available tools for function calling
+        available_tools = tools_service.get_tools()
+        
+        # Generate response using OpenAI with RAG context and tools
         openai_response = await openai_service.chat_completion(
             messages=messages,
             system_prompt=system_prompt,
-            context=context
+            context=context,
+            tools=available_tools
         )
         
-        response_content = openai_response.get("content", "I'm sorry, I couldn't generate a response.")
+        response_content = openai_response.get("content", "")
+        tool_calls = openai_response.get("tool_calls")
+        
+        # Handle tool calls if present
+        if tool_calls:
+            logger.info(f"AI requested {len(tool_calls)} tool calls")
+            
+            # Execute each tool call
+            tool_results = []
+            for tool_call in tool_calls:
+                try:
+                    function_name = tool_call["function"]["name"]
+                    function_args = json.loads(tool_call["function"]["arguments"])
+                    
+                    logger.info(f"Executing tool: {function_name} with args: {function_args}")
+                    
+                    # Queue tool execution
+                    task_result = execute_ai_action.delay(
+                        current_user["id"],
+                        function_name,
+                        function_args
+                    )
+                    
+                    # For now, wait for the task to complete (in production, you might handle this asynchronously)
+                    execution_result = task_result.get(timeout=30)
+                    tool_results.append({
+                        "tool": function_name,
+                        "status": "success",
+                        "result": execution_result
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"Tool execution failed: {str(e)}")
+                    tool_results.append({
+                        "tool": function_name,
+                        "status": "error",
+                        "error": str(e)
+                    })
+            
+            # Create follow-up conversation with tool results
+            tool_results_message = "Tool execution results:\n" + "\n".join([
+                f"- {result['tool']}: {'✅ ' + str(result.get('result', '')) if result['status'] == 'success' else '❌ ' + result.get('error', '')}"
+                for result in tool_results
+            ])
+            
+            # Get AI's final response after tool execution
+            messages.append({"role": "assistant", "content": response_content or "I'll help you with that."})
+            messages.append({"role": "system", "content": tool_results_message})
+            messages.append({"role": "user", "content": "Please provide a summary of the actions completed."})
+            
+            final_response = await openai_service.chat_completion(
+                messages=messages,
+                system_prompt=system_prompt,
+                context=context
+            )
+            
+            response_content = final_response.get("content", "Actions completed successfully!")
+            
+            # Include tool results in the response
+            response_content += f"\n\n**Actions Taken:**\n{tool_results_message}"
+        
+        # Ensure we have some response content
+        if not response_content:
+            response_content = "I'm sorry, I couldn't generate a response."
         
         # Save conversation to database
         conversation_id = await save_conversation(
@@ -291,6 +361,12 @@ Your primary responsibilities:
 - Answer questions about client history and interactions
 - Suggest follow-up actions based on email content
 - List and search through contacts, emails, and calendar events
+- PERFORM ACTIONS: Send emails, create calendar events, and create HubSpot contacts when requested
+
+Available Actions:
+- **Send Email**: I can send emails on your behalf using your Gmail account
+- **Create Calendar Events**: I can schedule meetings and appointments in your Google Calendar
+- **Create HubSpot Contacts**: I can add new contacts to your HubSpot CRM
 
 Guidelines:
 - Always be professional and maintain confidentiality
@@ -301,7 +377,9 @@ Guidelines:
 - Format your responses with proper markdown for better readability
 - Be concise but thorough in your responses
 - When context is provided, USE IT to answer the user's questions
-- If you don't have enough information, ask clarifying questions"""
+- If you don't have enough information, ask clarifying questions
+- When asked to perform actions (send email, schedule meeting, create contact), use the appropriate tools
+- Confirm important details before taking actions that affect external systems"""
 
     if ongoing_instructions:
         base_prompt += "\n\nOngoing Instructions to Remember:\n"

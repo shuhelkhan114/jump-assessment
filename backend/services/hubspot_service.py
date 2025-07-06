@@ -178,7 +178,7 @@ class HubSpotService:
             raise
     
     async def create_contact(self, contact_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new contact in HubSpot"""
+        """Create a new contact in HubSpot (or return existing if already exists)"""
         try:
             if not self.client:
                 raise Exception("HubSpot service not initialized")
@@ -198,6 +198,55 @@ class HubSpotService:
                 data = response.json()
                 logger.info(f"Created contact in HubSpot: {data.get('id')}")
                 return data
+            elif response.status_code == 409:
+                # Contact already exists, try to get existing contact
+                logger.info(f"Contact already exists, finding existing contact")
+                try:
+                    # Parse the error response to get existing contact ID
+                    error_data = response.json()
+                    if "Existing ID:" in error_data.get("message", ""):
+                        existing_id = error_data["message"].split("Existing ID: ")[1].split('"')[0]
+                        logger.info(f"Found existing contact ID: {existing_id}")
+                        
+                        # Get the existing contact details
+                        get_response = await self.client.get(
+                            f"/crm/v3/objects/contacts/{existing_id}",
+                            params={"properties": "firstname,lastname,email,phone,company,jobtitle,industry,lifecyclestage"}
+                        )
+                        
+                        if get_response.status_code == 200:
+                            existing_contact = get_response.json()
+                            logger.info(f"Retrieved existing contact: {existing_contact.get('id')}")
+                            return {
+                                **existing_contact,
+                                "_status": "existing",
+                                "_message": "Contact already exists in HubSpot"
+                            }
+                    
+                    # If we can't parse the ID, try to search by email
+                    if "email" in contact_data:
+                        existing_contact = await self.get_contact_by_email(contact_data["email"])
+                        if existing_contact:
+                            logger.info(f"Found existing contact by email: {existing_contact.get('id')}")
+                            return {
+                                **existing_contact,
+                                "_status": "existing",
+                                "_message": "Contact already exists in HubSpot"
+                            }
+                    
+                    # If we still can't find the contact, return the error info
+                    logger.warning(f"Contact exists but couldn't retrieve details: {error_data}")
+                    return {
+                        "_status": "conflict",
+                        "_message": f"Contact already exists in HubSpot: {error_data.get('message', 'Unknown conflict')}"
+                    }
+                
+                except Exception as parse_error:
+                    logger.error(f"Error parsing existing contact: {str(parse_error)}")
+                    return {
+                        "_status": "conflict",
+                        "_message": "Contact already exists in HubSpot but couldn't retrieve details"
+                    }
             else:
                 logger.error(f"HubSpot API error: {response.status_code} - {response.text}")
                 raise Exception(f"HubSpot API error: {response.status_code}")
@@ -365,6 +414,27 @@ class HubSpotService:
         """Close the HTTP client"""
         if self.client:
             await self.client.aclose()
+    
+    def close_sync(self):
+        """Close the HTTP client synchronously (for Celery tasks)"""
+        if self.client:
+            try:
+                # Try to close gracefully
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # If loop is running, schedule close
+                        loop.create_task(self.client.aclose())
+                    else:
+                        # If loop is not running, run it
+                        asyncio.run(self.client.aclose())
+                except RuntimeError:
+                    # Event loop is closed, just set client to None
+                    self.client = None
+            except Exception:
+                # If all else fails, just set client to None
+                self.client = None
 
 # Global service instance
 hubspot_service = HubSpotService() 
