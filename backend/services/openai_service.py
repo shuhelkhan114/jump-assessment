@@ -207,10 +207,15 @@ When the user asks you to perform an action like "Schedule an appointment with S
 
 For appointment scheduling specifically:
 - Search for the contact first
+- If no contact is found, create the contact using create_contact tool with context="appointment_scheduling"
 - Get their contact details including email
 - Generate 3-5 available time slots
 - Send a professional email with available times
 - Be prepared to handle responses and reschedule if needed
+
+**IMPORTANT for appointment scheduling:**
+When creating contacts during appointment workflows, ALWAYS use context="appointment_scheduling" 
+to prevent them from receiving automated thank you emails meant for customers.
 
 Always use the available tools to accomplish tasks rather than just describing what you would do."""
 

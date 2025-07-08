@@ -127,7 +127,7 @@ async def send_message(
                     
                     # Wait for the task to complete with shorter timeout and better error handling
                     try:
-                        execution_result = task_result.get(timeout=10)  # Reduced timeout
+                        execution_result = task_result.get(timeout=35)  # Increased timeout for HubSpot API calls
                         tool_results.append({
                             "tool": function_name,
                             "status": "success",
@@ -177,6 +177,19 @@ async def send_message(
                                 detailed_summary.append(events_summary)
                             else:
                                 detailed_summary.append(f"✅ {message}")
+                        elif tool_name == 'create_calendar_event' and 'details' in result_data:
+                            details = result_data['details']
+                            event_summary = f"✅ {message}\n\nCALENDAR EVENT CREATED:\n"
+                            event_summary += f"- Title: {details.get('title', 'No title')}\n"
+                            event_summary += f"- Start: {details.get('start', 'No start time')}\n"
+                            event_summary += f"- End: {details.get('end', 'No end time')}\n"
+                            event_summary += f"- Attendees: {details.get('attendees', [])}\n"
+                            event_summary += f"- Location: {details.get('location', 'No location')}\n"
+                            if details.get('link'):
+                                event_summary += f"- Calendar Link: {details.get('link')}\n"
+                            if details.get('id'):
+                                event_summary += f"- Event ID: {details.get('id')}\n"
+                            detailed_summary.append(event_summary)
                         elif tool_name == 'send_email' and 'details' in result_data:
                             details = result_data['details']
                             email_summary = f"✅ {message}\n\nEMAIL SENT:\n"
@@ -327,7 +340,7 @@ async def send_message_to_session(
                     
                     # Wait for the task to complete with shorter timeout and better error handling
                     try:
-                        execution_result = task_result.get(timeout=10)  # Reduced timeout
+                        execution_result = task_result.get(timeout=35)  # Increased timeout for HubSpot API calls
                         tool_results.append({
                             "tool": function_name,
                             "status": "success",
@@ -377,6 +390,19 @@ async def send_message_to_session(
                                 detailed_summary.append(events_summary)
                             else:
                                 detailed_summary.append(f"✅ {message}")
+                        elif tool_name == 'create_calendar_event' and 'details' in result_data:
+                            details = result_data['details']
+                            event_summary = f"✅ {message}\n\nCALENDAR EVENT CREATED:\n"
+                            event_summary += f"- Title: {details.get('title', 'No title')}\n"
+                            event_summary += f"- Start: {details.get('start', 'No start time')}\n"
+                            event_summary += f"- End: {details.get('end', 'No end time')}\n"
+                            event_summary += f"- Attendees: {details.get('attendees', [])}\n"
+                            event_summary += f"- Location: {details.get('location', 'No location')}\n"
+                            if details.get('link'):
+                                event_summary += f"- Calendar Link: {details.get('link')}\n"
+                            if details.get('id'):
+                                event_summary += f"- Event ID: {details.get('id')}\n"
+                            detailed_summary.append(event_summary)
                         elif tool_name == 'send_email' and 'details' in result_data:
                             details = result_data['details']
                             email_summary = f"✅ {message}\n\nEMAIL SENT:\n"
@@ -956,10 +982,17 @@ Available Actions:
 - **Create Calendar Events**: I can schedule meetings and appointments in your Google Calendar
 - **Create HubSpot Contacts**: I can add new contacts to your HubSpot CRM
 
+**IMPORTANT - Calendar Event Scheduling Process:**
+When a user asks to schedule a meeting/call with someone:
+1. FIRST: Search for the contact using their name to find their email address
+2. THEN: Create the calendar event with their email in the attendees list
+3. This ensures the calendar invitation is sent to them properly
+
 Guidelines:
 - **ACCURACY FIRST**: Present data exactly as it exists - do not summarize, paraphrase, or modify information unless specifically asked to do so
 - **NO UNNECESSARY SUMMARIZATION**: When showing calendar events, contacts, or emails, present the actual data without condensing or rewriting
 - Only organize or format data to make it more readable - never change, omit, or add information
+- **TIME ZONE HANDLING**: When mentioning specific times or dates from calendar events, emails, or schedules, note that they should be interpreted in the user's local time zone. Do not assume or mention specific timezones like UTC unless explicitly relevant.
 - Always be professional and maintain confidentiality
 - Provide specific, actionable insights when possible
 - Reference relevant emails or contact information when answering

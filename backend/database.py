@@ -130,7 +130,10 @@ class HubspotContact(Base):
     # Thank you email tracking
     thank_you_email_sent = Column(Boolean, default=False)
     thank_you_email_sent_at = Column(DateTime, nullable=True)
-    
+
+    # Contact creation context to determine email behavior
+    contact_creation_context = Column(String, nullable=True, default="customer")  # "customer", "appointment_scheduling", "email_contact", etc.
+
     # Vector embedding for RAG
     embedding = Column(Vector(1536), nullable=True)
     

@@ -380,9 +380,11 @@ This contact was automatically created from an incoming email."""
                         lead_status=hubspot_contact.get("properties", {}).get("hs_lead_status", ""),
                         created_at=datetime.utcnow(),
                         updated_at=datetime.utcnow(),
-                        # Thank you email fields - set defaults
+                        # Thank you email fields - set defaults for email contacts
                         thank_you_email_sent=False,
-                        thank_you_email_sent_at=None
+                        thank_you_email_sent_at=None,
+                        # Set context as email_contact since this was created from an incoming email
+                        contact_creation_context="email_contact"
                     )
                     
                     session.add(new_contact)
@@ -412,7 +414,9 @@ This contact was automatically created from an incoming email."""
                             lifecyclestage=hubspot_contact.get("properties", {}).get("lifecyclestage", ""),
                             lead_status=hubspot_contact.get("properties", {}).get("hs_lead_status", ""),
                             created_at=datetime.utcnow(),
-                            updated_at=datetime.utcnow()
+                            updated_at=datetime.utcnow(),
+                            # Set context as email_contact since this was created from an incoming email
+                            contact_creation_context="email_contact"
                         )
                         
                         session.add(fallback_contact)

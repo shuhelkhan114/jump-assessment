@@ -17,6 +17,7 @@ from config import get_settings
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 import os
+import requests
 
 logger = structlog.get_logger()
 settings = get_settings()
@@ -270,15 +271,16 @@ def trigger_hubspot_sync(user_id: str):
 
 @celery_app.task(bind=True)
 def refresh_expiring_tokens(self):
-    """Proactively refresh Google tokens that are about to expire"""
+    """Proactively refresh Google and HubSpot tokens that are about to expire"""
     try:
-        logger.info("Starting proactive token refresh check")
+        logger.info("Starting proactive token refresh check for all services")
         
         with SyncSessionLocal() as session:
-            # Find users with Google tokens that expire within the next 30 minutes
+            # Find users with tokens that expire within the next 30 minutes
             thirty_minutes_from_now = datetime.now(timezone.utc) + timedelta(minutes=30)
             
-            result = session.execute(
+            # Get users with Google tokens that need refresh
+            google_result = session.execute(
                 select(User).where(
                     User.google_access_token.isnot(None),
                     User.google_refresh_token.isnot(None),
@@ -286,12 +288,26 @@ def refresh_expiring_tokens(self):
                     User.google_token_expires_at <= thirty_minutes_from_now
                 )
             )
-            users_to_refresh = result.scalars().all()
+            google_users = google_result.scalars().all()
             
-            refreshed_count = 0
-            failed_count = 0
+            # Get users with HubSpot tokens that need refresh
+            hubspot_result = session.execute(
+                select(User).where(
+                    User.hubspot_access_token.isnot(None),
+                    User.hubspot_refresh_token.isnot(None),
+                    User.hubspot_token_expires_at.isnot(None),
+                    User.hubspot_token_expires_at <= thirty_minutes_from_now
+                )
+            )
+            hubspot_users = hubspot_result.scalars().all()
             
-            for user in users_to_refresh:
+            google_refreshed = 0
+            google_failed = 0
+            hubspot_refreshed = 0
+            hubspot_failed = 0
+            
+            # Refresh Google tokens
+            for user in google_users:
                 try:
                     logger.info(f"Proactively refreshing Google token for user {user.id}")
                     
@@ -323,23 +339,74 @@ def refresh_expiring_tokens(self):
                         user.updated_at = datetime.utcnow()
                         
                         session.commit()
-                        refreshed_count += 1
+                        google_refreshed += 1
                         logger.info(f"Successfully refreshed Google token for user {user.id}")
                     else:
-                        logger.warning(f"Token refresh for user {user.id} didn't return a new token")
+                        logger.warning(f"Google token refresh for user {user.id} didn't return a new token")
                     
                 except Exception as user_error:
-                    failed_count += 1
+                    google_failed += 1
                     logger.error(f"Failed to refresh Google token for user {user.id}: {str(user_error)}")
                     # Continue with other users
                     continue
             
-            logger.info(f"Proactive token refresh completed: {refreshed_count} refreshed, {failed_count} failed")
+            # Refresh HubSpot tokens
+            for user in hubspot_users:
+                try:
+                    logger.info(f"Proactively refreshing HubSpot token for user {user.id}")
+                    
+                    import requests
+                    # Refresh HubSpot token using OAuth2 refresh flow
+                    response = requests.post(
+                        "https://api.hubapi.com/oauth/v1/token",
+                        data={
+                            "grant_type": "refresh_token",
+                            "client_id": os.getenv("HUBSPOT_CLIENT_ID"),
+                            "client_secret": os.getenv("HUBSPOT_CLIENT_SECRET"),
+                            "refresh_token": user.hubspot_refresh_token
+                        },
+                        timeout=30
+                    )
+                    
+                    if response.status_code == 200:
+                        token_data = response.json()
+                        
+                        # Update user tokens
+                        user.hubspot_access_token = token_data["access_token"]
+                        expires_in = token_data.get("expires_in", 21600)  # Default 6 hours
+                        user.hubspot_token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+                        
+                        # Update refresh token if provided
+                        if "refresh_token" in token_data:
+                            user.hubspot_refresh_token = token_data["refresh_token"]
+                        
+                        user.updated_at = datetime.utcnow()
+                        session.commit()
+                        hubspot_refreshed += 1
+                        logger.info(f"Successfully refreshed HubSpot token for user {user.id}")
+                    else:
+                        hubspot_failed += 1
+                        logger.error(f"Failed to refresh HubSpot token for user {user.id}: HTTP {response.status_code} - {response.text}")
+                    
+                except Exception as user_error:
+                    hubspot_failed += 1
+                    logger.error(f"Failed to refresh HubSpot token for user {user.id}: {str(user_error)}")
+                    # Continue with other users
+                    continue
+            
+            logger.info(f"Token refresh completed - Google: {google_refreshed} refreshed, {google_failed} failed | HubSpot: {hubspot_refreshed} refreshed, {hubspot_failed} failed")
             return {
                 "status": "success",
-                "refreshed_count": refreshed_count,
-                "failed_count": failed_count,
-                "total_checked": len(users_to_refresh)
+                "google": {
+                    "refreshed_count": google_refreshed,
+                    "failed_count": google_failed,
+                    "total_checked": len(google_users)
+                },
+                "hubspot": {
+                    "refreshed_count": hubspot_refreshed,
+                    "failed_count": hubspot_failed,
+                    "total_checked": len(hubspot_users)
+                }
             }
         
     except Exception as e:

@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { ChatResponse, ConversationHistory, ToolResult } from '../types/api';
-import SyncStatusPanel from '../components/SyncStatusPanel';
 
 // Enhanced message type to include tool results
 interface ChatMessage {
@@ -303,11 +302,6 @@ export const ChatPage: React.FC = () => {
             <div className="flex items-center space-x-3">
               <HubSpotIntegration />
             </div>
-          </div>
-          
-          {/* Sync Status Panel */}
-          <div className="mt-4 space-y-3">
-            <SyncStatusPanel />
           </div>
         </div>
 

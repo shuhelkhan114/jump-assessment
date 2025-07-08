@@ -230,7 +230,7 @@ class RAGService:
                 
                 events = []
                 for row in result:
-                    # Format datetime for display
+                    # Format datetime for display (these are stored as UTC, frontend will convert to local time)
                     if row.start_datetime:
                         start_display = row.start_datetime.strftime("%B %d, %Y at %I:%M %p")
                     elif row.start_date:

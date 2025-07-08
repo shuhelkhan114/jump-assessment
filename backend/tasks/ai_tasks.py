@@ -12,6 +12,8 @@ def execute_ai_action(self, user_id: str, action_type: str, action_data: dict):
         
         if action_type == "send_email":
             return _execute_send_email(user_id, action_data)
+        elif action_type == "search_contacts":
+            return _execute_search_contacts(user_id, action_data)
         elif action_type == "create_calendar_event":
             return _execute_create_calendar_event(user_id, action_data)
         elif action_type == "get_calendar_schedule":
@@ -53,6 +55,70 @@ def _execute_send_email(user_id: str, action_data: dict) -> dict:
         
     except Exception as e:
         logger.error(f"Failed to send email: {str(e)}")
+        raise e
+
+def _execute_search_contacts(user_id: str, action_data: dict) -> dict:
+    """Execute search contacts action"""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+    from database import User
+    from services.hubspot_service import HubSpotService
+    from config import get_settings
+    import asyncio
+    
+    logger.info(f"Searching HubSpot contacts for user {user_id}: {action_data}")
+    
+    try:
+        # Extract search parameters
+        query = action_data.get("query")
+        if not query:
+            raise ValueError("Query is required to search contacts")
+        
+        # Get user with OAuth tokens (synchronous database access for Celery)
+        settings = get_settings()
+        sync_engine = create_engine(settings.database_url, echo=False)
+        SyncSessionLocal = sessionmaker(bind=sync_engine)
+        
+        with SyncSessionLocal() as session:
+            user_result = session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = user_result.scalar_one_or_none()
+            
+            if not user:
+                raise Exception(f"User {user_id} not found")
+            
+            if not user.hubspot_access_token:
+                raise Exception(f"User {user_id} has no HubSpot access token")
+            
+            # Initialize HubSpot service
+            hubspot_service = HubSpotService(user.hubspot_access_token)
+            
+            # Perform search
+            search_result = asyncio.run(hubspot_service.search_contacts(query))
+            
+            # Close HubSpot client
+            hubspot_service.close_sync()
+            
+            if search_result.get("_status") == "success":
+                contacts = search_result.get("results", [])
+                logger.info(f"Found {len(contacts)} HubSpot contacts matching query '{query}' for user {user_id}")
+                return {
+                    "action": "search_contacts",
+                    "status": "success",
+                    "message": f"Found {len(contacts)} HubSpot contacts matching query '{query}'",
+                    "details": {
+                        "query": query,
+                        "total_results": len(contacts),
+                        "contacts": contacts
+                    }
+                }
+            else:
+                logger.error(f"Failed to search HubSpot contacts for user {user_id}: {search_result.get('_message')}")
+                raise Exception(f"Failed to search HubSpot contacts: {search_result.get('_message')}")
+        
+    except Exception as e:
+        logger.error(f"Failed to search HubSpot contacts: {str(e)}")
         raise e
 
 def _execute_create_calendar_event(user_id: str, action_data: dict) -> dict:

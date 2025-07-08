@@ -25,6 +25,7 @@ class AIToolsService:
         self.tools_registry = {
             "search_contacts": self.search_contacts,
             "get_contact_details": self.get_contact_details,
+            "create_contact": self.create_contact,
             "send_email": self.send_email,
             "get_calendar_availability": self.get_calendar_availability,
             "create_calendar_event": self.create_calendar_event,
@@ -150,6 +151,79 @@ class AIToolsService:
             logger.error(f"Get contact details failed: {str(e)}")
             return {"error": str(e)}
     
+    async def create_contact(self, name: str, email: str, user_id: str, context: str = "customer") -> Dict[str, Any]:
+        """Create a new HubSpot contact with specified context"""
+        try:
+            # Parse name into first and last name
+            name_parts = name.strip().split()
+            firstname = name_parts[0] if name_parts else ""
+            lastname = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+            
+            # Get user for HubSpot initialization
+            from database import get_user_by_id
+            user_data = await get_user_by_id(user_id)
+            
+            if not user_data or not user_data.get("hubspot_access_token"):
+                return {"error": "HubSpot not connected or access token missing"}
+            
+            # Initialize HubSpot service
+            initialized = hubspot_service.initialize_service(
+                access_token=user_data["hubspot_access_token"]
+            )
+            
+            if not initialized:
+                return {"error": "Failed to initialize HubSpot service"}
+            
+            # Create contact data
+            contact_data = {
+                "email": email,
+                "firstname": firstname,
+                "lastname": lastname,
+                "lifecyclestage": "lead" if context == "appointment_scheduling" else "customer"
+            }
+            
+            # Create contact in HubSpot
+            hubspot_contact = await hubspot_service.create_contact(contact_data)
+            
+            if not hubspot_contact:
+                return {"error": "Failed to create contact in HubSpot"}
+            
+            # Save to local database with context
+            async with AsyncSessionLocal() as session:
+                new_contact = HubspotContact(
+                    id=str(hubspot_contact.get("id")),
+                    user_id=user_id,
+                    hubspot_id=str(hubspot_contact.get("id")),
+                    email=email,
+                    firstname=firstname,
+                    lastname=lastname,
+                    lifecyclestage=contact_data["lifecyclestage"],
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                    # Set context and thank you email defaults based on context
+                    contact_creation_context=context,
+                    thank_you_email_sent=False if context == "customer" else True,  # Skip thank you for appointment contacts
+                    thank_you_email_sent_at=datetime.utcnow() if context != "customer" else None
+                )
+                
+                session.add(new_contact)
+                await session.commit()
+                
+                logger.info(f"✅ Created contact {name} ({email}) with context '{context}'")
+                
+                return {
+                    "success": True,
+                    "contact_id": new_contact.id,
+                    "hubspot_id": new_contact.hubspot_id,
+                    "name": name,
+                    "email": email,
+                    "context": context
+                }
+                
+        except Exception as e:
+            logger.error(f"Create contact failed: {str(e)}")
+            return {"error": str(e)}
+
     async def send_email(self, recipient_email: str, subject: str, body: str, user_id: str) -> Dict[str, Any]:
         """Send an email via Gmail"""
         try:
@@ -275,17 +349,15 @@ class AIToolsService:
                                 break
                         
                         if is_available:
-                            # Format time nicely
-                            date_str = current_slot.strftime("%A, %B %d")
-                            time_str = current_slot.strftime("%I:%M %p")
-                            
+                            # Format time for display (remove explicit UTC formatting)
+                            # Let the frontend handle timezone conversion
                             suggestions.append({
-                                "start_time": time_str,
-                                "date": date_str,
+                                "start_time": current_slot.strftime("%I:%M %p"),
+                                "date": current_slot.strftime("%A, %B %d"),
                                 "start_datetime": current_slot.isoformat(),
                                 "end_datetime": slot_end.isoformat(),
                                 "available": True,
-                                "formatted": f"{date_str} at {time_str}"
+                                "formatted": f"{current_slot.strftime('%A, %B %d')} at {current_slot.strftime('%I:%M %p')}"
                             })
                         
                         # Limit to 6 suggestions for email readability
@@ -373,23 +445,14 @@ class AIToolsService:
                 return {"error": "Failed to initialize Google services"}
             
             # Create calendar event
-            event_data = {
-                "summary": title,
-                "description": description,
-                "start": {
-                    "dateTime": start_datetime,
-                    "timeZone": "UTC"
-                },
-                "end": {
-                    "dateTime": end_datetime,
-                    "timeZone": "UTC"
-                },
-                "attendees": [
-                    {"email": attendee_email}
-                ]
-            }
-            
-            result = await gmail_service.create_calendar_event(event_data)
+            result = await gmail_service.create_calendar_event(
+                title=title,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                description=description,
+                attendees=[attendee_email],
+                location=""
+            )
             
             if result:
                 return {
@@ -526,6 +589,33 @@ AI_TOOLS_DEFINITIONS = [
                     }
                 },
                 "required": ["contact_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_contact",
+            "description": "Create a new HubSpot contact with specified context (customer or appointment_scheduling)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Full name of the contact"
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "Email address of the contact"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Context of contact creation: 'customer' for regular customers, 'appointment_scheduling' for appointment contacts",
+                        "enum": ["customer", "appointment_scheduling", "email_contact"],
+                        "default": "customer"
+                    }
+                },
+                "required": ["name", "email"]
             }
         }
     },

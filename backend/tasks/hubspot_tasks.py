@@ -6,9 +6,10 @@ from typing import Dict, Any, List
 import asyncio
 import json
 import structlog
-from datetime import datetime
-from sqlalchemy import text, create_engine, select
+from datetime import datetime, timedelta
+from sqlalchemy import text, create_engine, select, update
 from sqlalchemy.orm import sessionmaker
+import requests
 
 from database import User, HubspotContact, HubspotDeal, HubspotCompany
 from services.hubspot_service import hubspot_service
@@ -23,6 +24,60 @@ settings = get_settings()
 sync_engine = create_engine(settings.database_url, echo=False)
 SyncSessionLocal = sessionmaker(bind=sync_engine)
 
+def _refresh_hubspot_token_sync(user_id: str, session) -> bool:
+    """
+    Synchronously refresh HubSpot token for a user
+    Returns True if successful, False otherwise
+    """
+    try:
+        # Get user
+        result = session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if not user or not user.hubspot_refresh_token:
+            logger.error(f"User {user_id} not found or has no HubSpot refresh token")
+            return False
+        
+        logger.info(f"Refreshing HubSpot token for user {user_id}")
+        
+        # Refresh HubSpot token using OAuth2 refresh flow
+        response = requests.post(
+            "https://api.hubapi.com/oauth/v1/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": settings.hubspot_client_id,
+                "client_secret": settings.hubspot_client_secret,
+                "refresh_token": user.hubspot_refresh_token
+            },
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            
+            # Update user tokens
+            session.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(
+                    hubspot_access_token=token_data["access_token"],
+                    hubspot_refresh_token=token_data.get("refresh_token", user.hubspot_refresh_token),
+                    hubspot_token_expires_at=datetime.utcnow() + timedelta(seconds=token_data.get("expires_in", 21600)),
+                    updated_at=datetime.utcnow()
+                )
+            )
+            session.commit()
+            
+            logger.info(f"Successfully refreshed HubSpot token for user {user_id}")
+            return True
+        else:
+            logger.error(f"Failed to refresh HubSpot token for user {user_id}: HTTP {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error refreshing HubSpot token for user {user_id}: {str(e)}")
+        return False
+
 @celery_app.task(bind=True, max_retries=3)
 def sync_hubspot_contacts(self, user_id: str):
     """Sync HubSpot contacts for a user"""
@@ -36,7 +91,22 @@ def sync_hubspot_contacts(self, user_id: str):
         return result
         
     except Exception as e:
+        error_str = str(e).lower()
         logger.error(f"HubSpot contacts sync failed for user {user_id}: {str(e)}")
+        
+        # Check if this is a 401 error and we should try to refresh token
+        if "401" in error_str:
+            logger.warning(f"🔄 Detected 401 error in HubSpot contacts sync, user {user_id} needs token refresh")
+            
+            # Try to refresh token before retrying
+            try:
+                with SyncSessionLocal() as session:
+                    if _refresh_hubspot_token_sync(user_id, session):
+                        logger.info(f"✅ Token refreshed successfully for user {user_id}, task will retry")
+                    else:
+                        logger.error(f"❌ Token refresh failed for user {user_id}")
+            except Exception as refresh_error:
+                logger.error(f"❌ Token refresh error for user {user_id}: {str(refresh_error)}")
         
         # Retry with exponential backoff
         if self.request.retries < self.max_retries:
@@ -47,145 +117,180 @@ def sync_hubspot_contacts(self, user_id: str):
 
 def _sync_hubspot_contacts_sync(user_id: str) -> Dict[str, Any]:
     """Sync implementation of HubSpot contacts sync"""
-    with SyncSessionLocal() as session:
-        # Get user with OAuth tokens
-        result = session.execute(
-            select(User).where(User.id == user_id)
-        )
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            raise Exception(f"User {user_id} not found")
-        
-        if not user.hubspot_access_token:
-            raise Exception(f"User {user_id} has no HubSpot access token")
-        
-        # Initialize HubSpot service
-        if not hubspot_service.initialize_service(user.hubspot_access_token):
-            raise Exception("Failed to initialize HubSpot service")
-        
-        # Get existing HubSpot contact IDs to avoid duplicates
-        existing_result = session.execute(
-            select(HubspotContact.hubspot_id).where(HubspotContact.user_id == user_id)
-        )
-        existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
-        
-        # Fetch contacts from HubSpot with pagination
-        all_contacts = []
-        after = None
-        
-        while True:
-            contacts_data = asyncio.run(hubspot_service.get_contacts(limit=100, after=after))
-            contacts = contacts_data.get('results', [])
+    max_token_refresh_attempts = 2
+    
+    for attempt in range(max_token_refresh_attempts):
+        with SyncSessionLocal() as session:
+            # Get user with OAuth tokens
+            result = session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = result.scalar_one_or_none()
             
-            if not contacts:
-                break
-                
-            all_contacts.extend(contacts)
+            if not user:
+                raise Exception(f"User {user_id} not found")
             
-            # Check for pagination
-            paging = contacts_data.get('paging', {})
-            if 'next' in paging:
-                after = paging['next']['after']
-            else:
-                break
-        
-        new_contacts = []
-        processed_count = 0
-        
-        for contact_data in all_contacts:
-            hubspot_id = contact_data['id']
-            
-            # Skip if already processed
-            if hubspot_id in existing_hubspot_ids:
-                continue
+            if not user.hubspot_access_token:
+                raise Exception(f"User {user_id} has no HubSpot access token")
             
             try:
-                # Extract contact properties
-                properties = contact_data.get('properties', {})
+                # Initialize HubSpot service
+                if not hubspot_service.initialize_service(user.hubspot_access_token):
+                    raise Exception("Failed to initialize HubSpot service")
                 
-                # Parse date fields
-                notes_last_contacted = _parse_hubspot_date(properties.get('notes_last_contacted'))
-                notes_last_activity_date = _parse_hubspot_date(properties.get('notes_last_activity_date'))
+                # Get existing HubSpot contact IDs to avoid duplicates
+                existing_result = session.execute(
+                    select(HubspotContact.hubspot_id).where(HubspotContact.user_id == user_id)
+                )
+                existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
                 
-                # Create contact record
-                try:
-                    # Try to create contact with thank you email fields
-                    contact = HubspotContact(
-                        user_id=user_id,
-                        hubspot_id=hubspot_id,
-                        firstname=properties.get('firstname'),
-                        lastname=properties.get('lastname'),
-                        email=properties.get('email'),
-                        phone=properties.get('phone'),
-                        company=properties.get('company'),
-                        jobtitle=properties.get('jobtitle'),
-                        industry=properties.get('industry'),
-                        lifecyclestage=properties.get('lifecyclestage'),
-                        lead_status=properties.get('lead_status'),
-                        notes_last_contacted=notes_last_contacted,
-                        notes_last_activity_date=notes_last_activity_date,
-                        num_notes=_parse_int(properties.get('num_notes')),
-                        properties=json.dumps(properties),
-                        # Thank you email fields with defaults
-                        thank_you_email_sent=False,
-                        thank_you_email_sent_at=None
-                    )
-                except TypeError as te:
-                    # Check if this is due to missing thank you email fields
-                    if "thank_you_email_sent" in str(te):
-                        logger.warning(f"⚠️ Thank you email fields not yet migrated, creating contact without them for {hubspot_id}")
-                        # Create contact without thank you email fields
-                        contact = HubspotContact(
-                            user_id=user_id,
-                            hubspot_id=hubspot_id,
-                            firstname=properties.get('firstname'),
-                            lastname=properties.get('lastname'),
-                            email=properties.get('email'),
-                            phone=properties.get('phone'),
-                            company=properties.get('company'),
-                            jobtitle=properties.get('jobtitle'),
-                            industry=properties.get('industry'),
-                            lifecyclestage=properties.get('lifecyclestage'),
-                            lead_status=properties.get('lead_status'),
-                            notes_last_contacted=notes_last_contacted,
-                            notes_last_activity_date=notes_last_activity_date,
-                            num_notes=_parse_int(properties.get('num_notes')),
-                            properties=json.dumps(properties)
-                        )
+                # Fetch contacts from HubSpot with pagination
+                all_contacts = []
+                after = None
+                
+                while True:
+                    contacts_data = asyncio.run(hubspot_service.get_contacts(limit=100, after=after))
+                    contacts = contacts_data.get('results', [])
+                    
+                    if not contacts:
+                        break
+                        
+                    all_contacts.extend(contacts)
+                    
+                    # Check for pagination
+                    paging = contacts_data.get('paging', {})
+                    if 'next' in paging:
+                        after = paging['next']['after']
                     else:
-                        raise te
+                        break
                 
-                session.add(contact)
-                new_contacts.append(contact)
-                processed_count += 1
+                new_contacts = []
+                processed_count = 0
                 
-                # Commit in batches
-                if processed_count % 20 == 0:
-                    session.commit()
-                    logger.info(f"Processed {processed_count} contacts for user {user_id}")
+                for contact_data in all_contacts:
+                    hubspot_id = contact_data['id']
+                    
+                    # Skip if already processed
+                    if hubspot_id in existing_hubspot_ids:
+                        continue
+                    
+                    try:
+                        # Extract contact properties
+                        properties = contact_data.get('properties', {})
+                        
+                        # Parse date fields
+                        notes_last_contacted = _parse_hubspot_date(properties.get('notes_last_contacted'))
+                        notes_last_activity_date = _parse_hubspot_date(properties.get('notes_last_activity_date'))
+                        
+                        # Create contact record
+                        try:
+                            # Try to create contact with thank you email fields
+                            contact = HubspotContact(
+                                user_id=user_id,
+                                hubspot_id=hubspot_id,
+                                firstname=properties.get('firstname'),
+                                lastname=properties.get('lastname'),
+                                email=properties.get('email'),
+                                phone=properties.get('phone'),
+                                company=properties.get('company'),
+                                jobtitle=properties.get('jobtitle'),
+                                industry=properties.get('industry'),
+                                lifecyclestage=properties.get('lifecyclestage'),
+                                lead_status=properties.get('lead_status'),
+                                notes_last_contacted=notes_last_contacted,
+                                notes_last_activity_date=notes_last_activity_date,
+                                num_notes=_parse_int(properties.get('num_notes')),
+                                properties=json.dumps(properties),
+                                # Thank you email fields with defaults
+                                thank_you_email_sent=False,
+                                thank_you_email_sent_at=None,
+                                # Set context as customer since this was synced from HubSpot
+                                contact_creation_context="customer"
+                            )
+                        except TypeError as te:
+                            # Check if this is due to missing thank you email fields
+                            if "thank_you_email_sent" in str(te):
+                                logger.warning(f"⚠️ Thank you email fields not yet migrated, creating contact without them for {hubspot_id}")
+                                # Create contact without thank you email fields
+                                contact = HubspotContact(
+                                    user_id=user_id,
+                                    hubspot_id=hubspot_id,
+                                    firstname=properties.get('firstname'),
+                                    lastname=properties.get('lastname'),
+                                    email=properties.get('email'),
+                                    phone=properties.get('phone'),
+                                    company=properties.get('company'),
+                                    jobtitle=properties.get('jobtitle'),
+                                    industry=properties.get('industry'),
+                                    lifecyclestage=properties.get('lifecyclestage'),
+                                    lead_status=properties.get('lead_status'),
+                                    notes_last_contacted=notes_last_contacted,
+                                    notes_last_activity_date=notes_last_activity_date,
+                                    num_notes=_parse_int(properties.get('num_notes')),
+                                    properties=json.dumps(properties),
+                                    # Set context as customer since this was synced from HubSpot
+                                    contact_creation_context="customer"
+                                )
+                            else:
+                                raise te
+                        
+                        session.add(contact)
+                        new_contacts.append(contact)
+                        processed_count += 1
+                        
+                        # Commit in batches
+                        if processed_count % 20 == 0:
+                            session.commit()
+                            logger.info(f"Processed {processed_count} contacts for user {user_id}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to process contact {hubspot_id}: {str(e)}")
+                        continue
+                
+                # Final commit
+                session.commit()
+                
+                # Schedule embedding generation for new contacts
+                if new_contacts:
+                    generate_hubspot_embeddings.delay(user_id, 'contacts', [contact.id for contact in new_contacts])
+                
+                # Close HubSpot service
+                hubspot_service.close_sync()
+                
+                return {
+                    "user_id": user_id,
+                    "total_contacts": len(all_contacts),
+                    "new_contacts": len(new_contacts),
+                    "processed_count": processed_count,
+                    "synced_at": datetime.utcnow().isoformat()
+                }
                 
             except Exception as e:
-                logger.error(f"Failed to process contact {hubspot_id}: {str(e)}")
-                continue
-        
-        # Final commit
-        session.commit()
-        
-        # Schedule embedding generation for new contacts
-        if new_contacts:
-            generate_hubspot_embeddings.delay(user_id, 'contacts', [contact.id for contact in new_contacts])
-        
-        # Close HubSpot service
-        hubspot_service.close_sync()
-        
-        return {
-            "user_id": user_id,
-            "total_contacts": len(all_contacts),
-            "new_contacts": len(new_contacts),
-            "processed_count": processed_count,
-            "synced_at": datetime.utcnow().isoformat()
-        }
+                error_str = str(e).lower()
+                
+                # Check if this is a 401 error and we haven't exhausted retry attempts
+                if "401" in error_str and attempt < max_token_refresh_attempts - 1:
+                    logger.warning(f"🔄 HubSpot 401 error for user {user_id}, attempting token refresh (attempt {attempt + 1})")
+                    
+                    # Try to refresh the token
+                    if _refresh_hubspot_token_sync(user_id, session):
+                        logger.info(f"✅ Token refresh successful for user {user_id}, retrying sync")
+                        # Close the current service before retrying
+                        try:
+                            hubspot_service.close_sync()
+                        except:
+                            pass
+                        continue  # Retry with new token
+                    else:
+                        logger.error(f"❌ Token refresh failed for user {user_id}")
+                        raise Exception(f"Failed to refresh HubSpot token for user {user_id}")
+                else:
+                    # Not a 401 error or we've exhausted retry attempts
+                    hubspot_service.close_sync()
+                    raise e
+    
+    # If we get here, we've exhausted all retry attempts
+    raise Exception(f"HubSpot contacts sync failed after {max_token_refresh_attempts} attempts for user {user_id}")
 
 @celery_app.task(bind=True, max_retries=3)
 def sync_hubspot_deals(self, user_id: str):
@@ -200,7 +305,22 @@ def sync_hubspot_deals(self, user_id: str):
         return result
         
     except Exception as e:
+        error_str = str(e).lower()
         logger.error(f"HubSpot deals sync failed for user {user_id}: {str(e)}")
+        
+        # Check if this is a 401 error and we should try to refresh token
+        if "401" in error_str:
+            logger.warning(f"🔄 Detected 401 error in HubSpot deals sync, user {user_id} needs token refresh")
+            
+            # Try to refresh token before retrying
+            try:
+                with SyncSessionLocal() as session:
+                    if _refresh_hubspot_token_sync(user_id, session):
+                        logger.info(f"✅ Token refreshed successfully for user {user_id}, task will retry")
+                    else:
+                        logger.error(f"❌ Token refresh failed for user {user_id}")
+            except Exception as refresh_error:
+                logger.error(f"❌ Token refresh error for user {user_id}: {str(refresh_error)}")
         
         # Retry with exponential backoff
         if self.request.retries < self.max_retries:
@@ -211,116 +331,147 @@ def sync_hubspot_deals(self, user_id: str):
 
 def _sync_hubspot_deals_sync(user_id: str) -> Dict[str, Any]:
     """Sync implementation of HubSpot deals sync"""
-    with SyncSessionLocal() as session:
-        # Get user with OAuth tokens
-        result = session.execute(
-            select(User).where(User.id == user_id)
-        )
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            raise Exception(f"User {user_id} not found")
-        
-        if not user.hubspot_access_token:
-            raise Exception(f"User {user_id} has no HubSpot access token")
-        
-        # Initialize HubSpot service
-        if not hubspot_service.initialize_service(user.hubspot_access_token):
-            raise Exception("Failed to initialize HubSpot service")
-        
-        # Get existing HubSpot deal IDs to avoid duplicates
-        existing_result = session.execute(
-            select(HubspotDeal.hubspot_id).where(HubspotDeal.user_id == user_id)
-        )
-        existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
-        
-        # Fetch deals from HubSpot with pagination
-        all_deals = []
-        after = None
-        
-        while True:
-            deals_data = asyncio.run(hubspot_service.get_deals(limit=100, after=after))
-            deals = deals_data.get('results', [])
+    max_token_refresh_attempts = 2
+    
+    for attempt in range(max_token_refresh_attempts):
+        with SyncSessionLocal() as session:
+            # Get user with OAuth tokens
+            result = session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = result.scalar_one_or_none()
             
-            if not deals:
-                break
-                
-            all_deals.extend(deals)
+            if not user:
+                raise Exception(f"User {user_id} not found")
             
-            # Check for pagination
-            paging = deals_data.get('paging', {})
-            if 'next' in paging:
-                after = paging['next']['after']
-            else:
-                break
-        
-        new_deals = []
-        processed_count = 0
-        
-        for deal_data in all_deals:
-            hubspot_id = deal_data['id']
-            
-            # Skip if already processed
-            if hubspot_id in existing_hubspot_ids:
-                continue
+            if not user.hubspot_access_token:
+                raise Exception(f"User {user_id} has no HubSpot access token")
             
             try:
-                # Extract deal properties
-                properties = deal_data.get('properties', {})
+                # Initialize HubSpot service
+                if not hubspot_service.initialize_service(user.hubspot_access_token):
+                    raise Exception("Failed to initialize HubSpot service")
                 
-                # Parse date fields
-                closedate = _parse_hubspot_date(properties.get('closedate'))
-                notes_last_contacted = _parse_hubspot_date(properties.get('notes_last_contacted'))
-                notes_last_activity_date = _parse_hubspot_date(properties.get('notes_last_activity_date'))
-                
-                # Create deal record
-                deal = HubspotDeal(
-                    user_id=user_id,
-                    hubspot_id=hubspot_id,
-                    dealname=properties.get('dealname'),
-                    amount=_parse_float(properties.get('amount')),
-                    dealstage=properties.get('dealstage'),
-                    pipeline=properties.get('pipeline'),
-                    closedate=closedate,
-                    dealtype=properties.get('dealtype'),
-                    description=properties.get('description'),
-                    notes_last_contacted=notes_last_contacted,
-                    notes_last_activity_date=notes_last_activity_date,
-                    num_notes=_parse_int(properties.get('num_notes')),
-                    hubspot_owner_id=properties.get('hubspot_owner_id'),
-                    properties=json.dumps(properties)
+                # Get existing HubSpot deal IDs to avoid duplicates
+                existing_result = session.execute(
+                    select(HubspotDeal.hubspot_id).where(HubspotDeal.user_id == user_id)
                 )
+                existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
                 
-                session.add(deal)
-                new_deals.append(deal)
-                processed_count += 1
+                # Fetch deals from HubSpot with pagination
+                all_deals = []
+                after = None
                 
-                # Commit in batches
-                if processed_count % 20 == 0:
-                    session.commit()
-                    logger.info(f"Processed {processed_count} deals for user {user_id}")
+                while True:
+                    deals_data = asyncio.run(hubspot_service.get_deals(limit=100, after=after))
+                    deals = deals_data.get('results', [])
+                    
+                    if not deals:
+                        break
+                        
+                    all_deals.extend(deals)
+                    
+                    # Check for pagination
+                    paging = deals_data.get('paging', {})
+                    if 'next' in paging:
+                        after = paging['next']['after']
+                    else:
+                        break
+                
+                new_deals = []
+                processed_count = 0
+                
+                for deal_data in all_deals:
+                    hubspot_id = deal_data['id']
+                    
+                    # Skip if already processed
+                    if hubspot_id in existing_hubspot_ids:
+                        continue
+                    
+                    try:
+                        # Extract deal properties
+                        properties = deal_data.get('properties', {})
+                        
+                        # Parse date fields
+                        closedate = _parse_hubspot_date(properties.get('closedate'))
+                        notes_last_contacted = _parse_hubspot_date(properties.get('notes_last_contacted'))
+                        notes_last_activity_date = _parse_hubspot_date(properties.get('notes_last_activity_date'))
+                        
+                        # Create deal record
+                        deal = HubspotDeal(
+                            user_id=user_id,
+                            hubspot_id=hubspot_id,
+                            dealname=properties.get('dealname'),
+                            amount=_parse_float(properties.get('amount')),
+                            dealstage=properties.get('dealstage'),
+                            pipeline=properties.get('pipeline'),
+                            closedate=closedate,
+                            dealtype=properties.get('dealtype'),
+                            description=properties.get('description'),
+                            notes_last_contacted=notes_last_contacted,
+                            notes_last_activity_date=notes_last_activity_date,
+                            num_notes=_parse_int(properties.get('num_notes')),
+                            hubspot_owner_id=properties.get('hubspot_owner_id'),
+                            properties=json.dumps(properties)
+                        )
+                        
+                        session.add(deal)
+                        new_deals.append(deal)
+                        processed_count += 1
+                        
+                        # Commit in batches
+                        if processed_count % 20 == 0:
+                            session.commit()
+                            logger.info(f"Processed {processed_count} deals for user {user_id}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to process deal {hubspot_id}: {str(e)}")
+                        continue
+                
+                # Final commit
+                session.commit()
+                
+                # Schedule embedding generation for new deals
+                if new_deals:
+                    generate_hubspot_embeddings.delay(user_id, 'deals', [deal.id for deal in new_deals])
+                
+                # Close HubSpot service
+                hubspot_service.close_sync()
+                
+                return {
+                    "user_id": user_id,
+                    "total_deals": len(all_deals),
+                    "new_deals": len(new_deals),
+                    "processed_count": processed_count,
+                    "synced_at": datetime.utcnow().isoformat()
+                }
                 
             except Exception as e:
-                logger.error(f"Failed to process deal {hubspot_id}: {str(e)}")
-                continue
-        
-        # Final commit
-        session.commit()
-        
-        # Schedule embedding generation for new deals
-        if new_deals:
-            generate_hubspot_embeddings.delay(user_id, 'deals', [deal.id for deal in new_deals])
-        
-        # Close HubSpot service
-        hubspot_service.close_sync()
-        
-        return {
-            "user_id": user_id,
-            "total_deals": len(all_deals),
-            "new_deals": len(new_deals),
-            "processed_count": processed_count,
-            "synced_at": datetime.utcnow().isoformat()
-        }
+                error_str = str(e).lower()
+                
+                # Check if this is a 401 error and we haven't exhausted retry attempts
+                if "401" in error_str and attempt < max_token_refresh_attempts - 1:
+                    logger.warning(f"🔄 HubSpot 401 error for user {user_id}, attempting token refresh (attempt {attempt + 1})")
+                    
+                    # Try to refresh the token
+                    if _refresh_hubspot_token_sync(user_id, session):
+                        logger.info(f"✅ Token refresh successful for user {user_id}, retrying sync")
+                        # Close the current service before retrying
+                        try:
+                            hubspot_service.close_sync()
+                        except:
+                            pass
+                        continue  # Retry with new token
+                    else:
+                        logger.error(f"❌ Token refresh failed for user {user_id}")
+                        raise Exception(f"Failed to refresh HubSpot token for user {user_id}")
+                else:
+                    # Not a 401 error or we've exhausted retry attempts
+                    hubspot_service.close_sync()
+                    raise e
+    
+    # If we get here, we've exhausted all retry attempts
+    raise Exception(f"HubSpot deals sync failed after {max_token_refresh_attempts} attempts for user {user_id}")
 
 @celery_app.task(bind=True, max_retries=3)
 def sync_hubspot_companies(self, user_id: str):
@@ -335,7 +486,22 @@ def sync_hubspot_companies(self, user_id: str):
         return result
         
     except Exception as e:
+        error_str = str(e).lower()
         logger.error(f"HubSpot companies sync failed for user {user_id}: {str(e)}")
+        
+        # Check if this is a 401 error and we should try to refresh token
+        if "401" in error_str:
+            logger.warning(f"🔄 Detected 401 error in HubSpot companies sync, user {user_id} needs token refresh")
+            
+            # Try to refresh token before retrying
+            try:
+                with SyncSessionLocal() as session:
+                    if _refresh_hubspot_token_sync(user_id, session):
+                        logger.info(f"✅ Token refreshed successfully for user {user_id}, task will retry")
+                    else:
+                        logger.error(f"❌ Token refresh failed for user {user_id}")
+            except Exception as refresh_error:
+                logger.error(f"❌ Token refresh error for user {user_id}: {str(refresh_error)}")
         
         # Retry with exponential backoff
         if self.request.retries < self.max_retries:
@@ -346,119 +512,150 @@ def sync_hubspot_companies(self, user_id: str):
 
 def _sync_hubspot_companies_sync(user_id: str) -> Dict[str, Any]:
     """Sync implementation of HubSpot companies sync"""
-    with SyncSessionLocal() as session:
-        # Get user with OAuth tokens
-        result = session.execute(
-            select(User).where(User.id == user_id)
-        )
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            raise Exception(f"User {user_id} not found")
-        
-        if not user.hubspot_access_token:
-            raise Exception(f"User {user_id} has no HubSpot access token")
-        
-        # Initialize HubSpot service
-        if not hubspot_service.initialize_service(user.hubspot_access_token):
-            raise Exception("Failed to initialize HubSpot service")
-        
-        # Get existing HubSpot company IDs to avoid duplicates
-        existing_result = session.execute(
-            select(HubspotCompany.hubspot_id).where(HubspotCompany.user_id == user_id)
-        )
-        existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
-        
-        # Fetch companies from HubSpot with pagination
-        all_companies = []
-        after = None
-        
-        while True:
-            companies_data = asyncio.run(hubspot_service.get_companies(limit=100, after=after))
-            companies = companies_data.get('results', [])
+    max_token_refresh_attempts = 2
+    
+    for attempt in range(max_token_refresh_attempts):
+        with SyncSessionLocal() as session:
+            # Get user with OAuth tokens
+            result = session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = result.scalar_one_or_none()
             
-            if not companies:
-                break
-                
-            all_companies.extend(companies)
+            if not user:
+                raise Exception(f"User {user_id} not found")
             
-            # Check for pagination
-            paging = companies_data.get('paging', {})
-            if 'next' in paging:
-                after = paging['next']['after']
-            else:
-                break
-        
-        new_companies = []
-        processed_count = 0
-        
-        for company_data in all_companies:
-            hubspot_id = company_data['id']
-            
-            # Skip if already processed
-            if hubspot_id in existing_hubspot_ids:
-                continue
+            if not user.hubspot_access_token:
+                raise Exception(f"User {user_id} has no HubSpot access token")
             
             try:
-                # Extract company properties
-                properties = company_data.get('properties', {})
-                
-                # Parse date fields
-                notes_last_contacted = _parse_hubspot_date(properties.get('notes_last_contacted'))
-                notes_last_activity_date = _parse_hubspot_date(properties.get('notes_last_activity_date'))
-                
-                # Create company record
-                company = HubspotCompany(
-                    user_id=user_id,
-                    hubspot_id=hubspot_id,
-                    name=properties.get('name'),
-                    domain=properties.get('domain'),
-                    industry=properties.get('industry'),
-                    type=properties.get('type'),
-                    description=properties.get('description'),
-                    phone=properties.get('phone'),
-                    address=properties.get('address'),
-                    city=properties.get('city'),
-                    state=properties.get('state'),
-                    country=properties.get('country'),
-                    num_employees=_parse_int(properties.get('num_employees')),
-                    annualrevenue=_parse_float(properties.get('annualrevenue')),
-                    notes_last_contacted=notes_last_contacted,
-                    notes_last_activity_date=notes_last_activity_date,
-                    num_notes=_parse_int(properties.get('num_notes')),
-                    properties=json.dumps(properties)
+                # Initialize HubSpot service
+                if not hubspot_service.initialize_service(user.hubspot_access_token):
+                    raise Exception("Failed to initialize HubSpot service")
+        
+                # Get existing HubSpot company IDs to avoid duplicates
+                existing_result = session.execute(
+                    select(HubspotCompany.hubspot_id).where(HubspotCompany.user_id == user_id)
                 )
+                existing_hubspot_ids = {row[0] for row in existing_result.fetchall()}
                 
-                session.add(company)
-                new_companies.append(company)
-                processed_count += 1
+                # Fetch companies from HubSpot with pagination
+                all_companies = []
+                after = None
                 
-                # Commit in batches
-                if processed_count % 20 == 0:
-                    session.commit()
-                    logger.info(f"Processed {processed_count} companies for user {user_id}")
+                while True:
+                    companies_data = asyncio.run(hubspot_service.get_companies(limit=100, after=after))
+                    companies = companies_data.get('results', [])
+                    
+                    if not companies:
+                        break
+                        
+                    all_companies.extend(companies)
+                    
+                    # Check for pagination
+                    paging = companies_data.get('paging', {})
+                    if 'next' in paging:
+                        after = paging['next']['after']
+                    else:
+                        break
+                
+                new_companies = []
+                processed_count = 0
+                
+                for company_data in all_companies:
+                    hubspot_id = company_data['id']
+                    
+                    # Skip if already processed
+                    if hubspot_id in existing_hubspot_ids:
+                        continue
+                    
+                    try:
+                        # Extract company properties
+                        properties = company_data.get('properties', {})
+                        
+                        # Parse date fields
+                        notes_last_contacted = _parse_hubspot_date(properties.get('notes_last_contacted'))
+                        notes_last_activity_date = _parse_hubspot_date(properties.get('notes_last_activity_date'))
+                        
+                        # Create company record
+                        company = HubspotCompany(
+                            user_id=user_id,
+                            hubspot_id=hubspot_id,
+                            name=properties.get('name'),
+                            domain=properties.get('domain'),
+                            industry=properties.get('industry'),
+                            type=properties.get('type'),
+                            description=properties.get('description'),
+                            phone=properties.get('phone'),
+                            address=properties.get('address'),
+                            city=properties.get('city'),
+                            state=properties.get('state'),
+                            country=properties.get('country'),
+                            num_employees=_parse_int(properties.get('num_employees')),
+                            annualrevenue=_parse_float(properties.get('annualrevenue')),
+                            notes_last_contacted=notes_last_contacted,
+                            notes_last_activity_date=notes_last_activity_date,
+                            num_notes=_parse_int(properties.get('num_notes')),
+                            properties=json.dumps(properties)
+                        )
+                        
+                        session.add(company)
+                        new_companies.append(company)
+                        processed_count += 1
+                        
+                        # Commit in batches
+                        if processed_count % 20 == 0:
+                            session.commit()
+                            logger.info(f"Processed {processed_count} companies for user {user_id}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to process company {hubspot_id}: {str(e)}")
+                        continue
+                
+                # Final commit
+                session.commit()
+                
+                # Schedule embedding generation for new companies
+                if new_companies:
+                    generate_hubspot_embeddings.delay(user_id, 'companies', [company.id for company in new_companies])
+                
+                # Close HubSpot service
+                hubspot_service.close_sync()
+                
+                return {
+                    "user_id": user_id,
+                    "total_companies": len(all_companies),
+                    "new_companies": len(new_companies),
+                    "processed_count": processed_count,
+                    "synced_at": datetime.utcnow().isoformat()
+                }
                 
             except Exception as e:
-                logger.error(f"Failed to process company {hubspot_id}: {str(e)}")
-                continue
-        
-        # Final commit
-        session.commit()
-        
-        # Schedule embedding generation for new companies
-        if new_companies:
-            generate_hubspot_embeddings.delay(user_id, 'companies', [company.id for company in new_companies])
-        
-        # Close HubSpot service
-        hubspot_service.close_sync()
-        
-        return {
-            "user_id": user_id,
-            "total_companies": len(all_companies),
-            "new_companies": len(new_companies),
-            "processed_count": processed_count,
-            "synced_at": datetime.utcnow().isoformat()
-        }
+                error_str = str(e).lower()
+                
+                # Check if this is a 401 error and we haven't exhausted retry attempts
+                if "401" in error_str and attempt < max_token_refresh_attempts - 1:
+                    logger.warning(f"🔄 HubSpot 401 error for user {user_id}, attempting token refresh (attempt {attempt + 1})")
+                    
+                    # Try to refresh the token
+                    if _refresh_hubspot_token_sync(user_id, session):
+                        logger.info(f"✅ Token refresh successful for user {user_id}, retrying sync")
+                        # Close the current service before retrying
+                        try:
+                            hubspot_service.close_sync()
+                        except:
+                            pass
+                        continue  # Retry with new token
+                    else:
+                        logger.error(f"❌ Token refresh failed for user {user_id}")
+                        raise Exception(f"Failed to refresh HubSpot token for user {user_id}")
+                else:
+                    # Not a 401 error or we've exhausted retry attempts
+                    hubspot_service.close_sync()
+                    raise e
+    
+    # If we get here, we've exhausted all retry attempts
+    raise Exception(f"HubSpot companies sync failed after {max_token_refresh_attempts} attempts for user {user_id}")
 
 @celery_app.task(bind=True, max_retries=3)
 def generate_hubspot_embeddings(self, user_id: str, object_type: str, object_ids: List[str]):
@@ -831,7 +1028,9 @@ def _send_thank_you_emails_sync(user_id: str = None) -> Dict[str, Any]:
                         HubspotContact.user_id == user.id,
                         HubspotContact.thank_you_email_sent == False,
                         HubspotContact.email.is_not(None),
-                        HubspotContact.email != ""
+                        HubspotContact.email != "",
+                        # Exclude appointment scheduling contacts from thank you emails
+                        HubspotContact.contact_creation_context != "appointment_scheduling"
                     ).order_by(HubspotContact.created_at.desc())
                 )
                 contacts_needing_emails = contacts_result.scalars().all()

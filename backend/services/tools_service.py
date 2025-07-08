@@ -26,6 +26,28 @@ class ToolsService:
             {
                 "type": "function",
                 "function": {
+                    "name": "search_contacts",
+                    "description": "Search for contacts in HubSpot CRM by name, email, or company. Use this to find contact information before scheduling meetings.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query (name, email, or company name)"
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of contacts to return (default: 5)",
+                                "default": 5
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "send_email",
                     "description": "Send an email to a recipient using Gmail. Use this when the user asks to send an email, compose a message, or reach out to someone.",
                     "parameters": {
@@ -57,7 +79,7 @@ class ToolsService:
                 "type": "function",
                 "function": {
                     "name": "create_calendar_event",
-                    "description": "Create a calendar event in Google Calendar. Use this when the user wants to schedule a meeting, appointment, or event.",
+                    "description": "Create a calendar event in Google Calendar. Use this when the user wants to schedule a meeting, appointment, or event. IMPORTANT: When scheduling with other people, first use search_contacts to find their email address, then include their email in attendees.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -82,8 +104,7 @@ class ToolsService:
                                 "items": {
                                     "type": "string"
                                 },
-                                "description": "List of attendee email addresses",
-                                "default": []
+                                "description": "List of attendee email addresses - REQUIRED when scheduling meetings with other people"
                             },
                             "location": {
                                 "type": "string",
@@ -91,7 +112,7 @@ class ToolsService:
                                 "default": ""
                             }
                         },
-                        "required": ["title", "start_datetime", "end_datetime"]
+                        "required": ["title", "start_datetime", "end_datetime", "attendees"]
                     }
                 }
             },

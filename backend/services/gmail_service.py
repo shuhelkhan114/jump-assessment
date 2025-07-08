@@ -547,13 +547,14 @@ class GmailService:
             if attendees:
                 event['attendees'] = [{'email': email} for email in attendees]
             
-            # Create the event
+            # Create the event and send email invitations
             result = self.calendar_service.events().insert(
                 calendarId='primary',
-                body=event
+                body=event,
+                sendNotifications=True
             ).execute()
             
-            logger.info(f"Calendar event created successfully: {result.get('id')}")
+            logger.info(f"Calendar event created successfully: {result.get('id')} - Email invitations sent to {len(attendees) if attendees else 0} attendees")
             
             return {
                 'id': result.get('id'),
