@@ -59,6 +59,9 @@ services:
       - backend
     environment:
       REACT_APP_API_URL: ${BACKEND_URL}
+      HOST: "0.0.0.0"
+      WDS_SOCKET_PORT: 0
+      DANGEROUSLY_DISABLE_HOST_CHECK: "true"
     volumes:
       - ./frontend:/app
       - /app/node_modules

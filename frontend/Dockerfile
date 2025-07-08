@@ -6,13 +6,24 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm ci
 
 # Copy source code
 COPY . .
 
-# Expose port
-EXPOSE 3000
+# Set environment variables
+ENV HOST=0.0.0.0
+ENV WDS_SOCKET_PORT=0
+ENV DANGEROUSLY_DISABLE_HOST_CHECK=true
 
-# Start the application
-CMD ["npm", "start"] 
+# Build the app
+RUN npm run build
+
+# Install serve to run the built app
+RUN npm install -g serve
+
+# Use non-root user
+USER node
+
+# Start the app with host settings
+CMD ["serve", "-s", "build", "-l", "3000", "--no-clipboard"] 
