@@ -305,28 +305,132 @@ class GmailPollingService:
         """Save the created contact to local database"""
         try:
             async with AsyncSessionLocal() as session:
-                new_contact = HubspotContact(
-                    id=str(hubspot_contact.get("id")),
-                    user_id=user_id,
-                    hubspot_id=str(hubspot_contact.get("id")),
-                    email=email,
-                    firstname=hubspot_contact.get("properties", {}).get("firstname", ""),
-                    lastname=hubspot_contact.get("properties", {}).get("lastname", ""),
-                    company=hubspot_contact.get("properties", {}).get("company", ""),
-                    phone=hubspot_contact.get("properties", {}).get("phone", ""),
-                    lifecyclestage=hubspot_contact.get("properties", {}).get("lifecyclestage", ""),
-                    lead_status=hubspot_contact.get("properties", {}).get("hs_lead_status", ""),
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow()
-                )
-                
-                session.add(new_contact)
-                await session.commit()
-                
-                logger.info(f"✅ Saved contact {email} to local database")
+                try:
+                    # Try to create contact with thank you email fields
+                    new_contact = HubspotContact(
+                        id=str(hubspot_contact.get("id")),
+                        user_id=user_id,
+                        hubspot_id=str(hubspot_contact.get("id")),
+                        email=email,
+                        firstname=hubspot_contact.get("properties", {}).get("firstname", ""),
+                        lastname=hubspot_contact.get("properties", {}).get("lastname", ""),
+                        company=hubspot_contact.get("properties", {}).get("company", ""),
+                        phone=hubspot_contact.get("properties", {}).get("phone", ""),
+                        lifecyclestage=hubspot_contact.get("properties", {}).get("lifecyclestage", ""),
+                        lead_status=hubspot_contact.get("properties", {}).get("hs_lead_status", ""),
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow(),
+                        # Thank you email fields - set defaults
+                        thank_you_email_sent=False,
+                        thank_you_email_sent_at=None
+                    )
+                    
+                    session.add(new_contact)
+                    await session.commit()
+                    
+                    logger.info(f"✅ Saved contact {email} to local database with thank you email fields")
+                    
+                    # Send thank you email to the new contact
+                    await self._send_thank_you_email(user_id, email, new_contact)
+                    
+                except Exception as db_error:
+                    # Check if this is a missing column error
+                    if "thank_you_email_sent" in str(db_error) and "does not exist" in str(db_error):
+                        logger.warning(f"⚠️ Thank you email fields not yet migrated, creating contact without them")
+                        await session.rollback()
+                        
+                        # Create contact without thank you email fields
+                        fallback_contact = HubspotContact(
+                            id=str(hubspot_contact.get("id")),
+                            user_id=user_id,
+                            hubspot_id=str(hubspot_contact.get("id")),
+                            email=email,
+                            firstname=hubspot_contact.get("properties", {}).get("firstname", ""),
+                            lastname=hubspot_contact.get("properties", {}).get("lastname", ""),
+                            company=hubspot_contact.get("properties", {}).get("company", ""),
+                            phone=hubspot_contact.get("properties", {}).get("phone", ""),
+                            lifecyclestage=hubspot_contact.get("properties", {}).get("lifecyclestage", ""),
+                            lead_status=hubspot_contact.get("properties", {}).get("hs_lead_status", ""),
+                            created_at=datetime.utcnow(),
+                            updated_at=datetime.utcnow()
+                        )
+                        
+                        session.add(fallback_contact)
+                        await session.commit()
+                        
+                        logger.info(f"✅ Saved contact {email} to local database (without thank you email fields)")
+                        
+                        # Send thank you email anyway (we'll track it separately if needed)
+                        await self._send_thank_you_email(user_id, email, fallback_contact)
+                    else:
+                        # Re-raise other database errors
+                        raise db_error
                 
         except Exception as e:
             logger.error(f"❌ Error saving contact to database: {str(e)}")
+    
+    async def _send_thank_you_email(self, user_id: str, contact_email: str, contact: HubspotContact):
+        """Send thank you email to new contact"""
+        try:
+            logger.info(f"📧 Sending thank you email to {contact_email}")
+            
+            # Get contact name for personalization
+            contact_name = f"{contact.firstname} {contact.lastname}".strip()
+            if not contact_name:
+                contact_name = contact_email.split('@')[0].title()  # Use email username as fallback
+            
+            # Create email content
+            subject = "Thank you for being a customer"
+            body = f"Hello {contact_name}, Thank you for being a customer."
+            
+            # Send email using Gmail service
+            success = await gmail_service.send_email(
+                to=contact_email,
+                subject=subject,
+                body=body
+            )
+            
+            if success:
+                logger.info(f"✅ Thank you email sent successfully to {contact_email}")
+                
+                # Update the contact to mark thank you email as sent
+                await self._mark_thank_you_email_sent(contact.id)
+            else:
+                logger.error(f"❌ Failed to send thank you email to {contact_email}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error sending thank you email to {contact_email}: {str(e)}")
+    
+    async def _mark_thank_you_email_sent(self, contact_id: str):
+        """Mark thank you email as sent for a contact"""
+        try:
+            async with AsyncSessionLocal() as session:
+                # Try to update with thank you email fields
+                try:
+                    from sqlalchemy import update
+                    
+                    await session.execute(
+                        update(HubspotContact)
+                        .where(HubspotContact.id == contact_id)
+                        .values(
+                            thank_you_email_sent=True,
+                            thank_you_email_sent_at=datetime.utcnow(),
+                            updated_at=datetime.utcnow()
+                        )
+                    )
+                    
+                    await session.commit()
+                    logger.info(f"✅ Marked thank you email as sent for contact {contact_id}")
+                    
+                except Exception as update_error:
+                    # If update fails due to missing columns, just log it
+                    if "thank_you_email_sent" in str(update_error):
+                        logger.warning(f"⚠️ Could not update thank you email status (fields not migrated) for contact {contact_id}")
+                    else:
+                        logger.error(f"❌ Error updating thank you email status for contact {contact_id}: {str(update_error)}")
+                        
+        except Exception as e:
+            logger.error(f"❌ Error marking thank you email as sent for contact {contact_id}: {str(e)}")
     
     async def _get_last_email_check_time(self, user_id: str) -> Optional[datetime]:
         """Get the last time we checked emails for this user"""

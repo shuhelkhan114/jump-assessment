@@ -109,23 +109,52 @@ def _sync_hubspot_contacts_sync(user_id: str) -> Dict[str, Any]:
                 notes_last_activity_date = _parse_hubspot_date(properties.get('notes_last_activity_date'))
                 
                 # Create contact record
-                contact = HubspotContact(
-                    user_id=user_id,
-                    hubspot_id=hubspot_id,
-                    firstname=properties.get('firstname'),
-                    lastname=properties.get('lastname'),
-                    email=properties.get('email'),
-                    phone=properties.get('phone'),
-                    company=properties.get('company'),
-                    jobtitle=properties.get('jobtitle'),
-                    industry=properties.get('industry'),
-                    lifecyclestage=properties.get('lifecyclestage'),
-                    lead_status=properties.get('lead_status'),
-                    notes_last_contacted=notes_last_contacted,
-                    notes_last_activity_date=notes_last_activity_date,
-                    num_notes=_parse_int(properties.get('num_notes')),
-                    properties=json.dumps(properties)
-                )
+                try:
+                    # Try to create contact with thank you email fields
+                    contact = HubspotContact(
+                        user_id=user_id,
+                        hubspot_id=hubspot_id,
+                        firstname=properties.get('firstname'),
+                        lastname=properties.get('lastname'),
+                        email=properties.get('email'),
+                        phone=properties.get('phone'),
+                        company=properties.get('company'),
+                        jobtitle=properties.get('jobtitle'),
+                        industry=properties.get('industry'),
+                        lifecyclestage=properties.get('lifecyclestage'),
+                        lead_status=properties.get('lead_status'),
+                        notes_last_contacted=notes_last_contacted,
+                        notes_last_activity_date=notes_last_activity_date,
+                        num_notes=_parse_int(properties.get('num_notes')),
+                        properties=json.dumps(properties),
+                        # Thank you email fields with defaults
+                        thank_you_email_sent=False,
+                        thank_you_email_sent_at=None
+                    )
+                except TypeError as te:
+                    # Check if this is due to missing thank you email fields
+                    if "thank_you_email_sent" in str(te):
+                        logger.warning(f"⚠️ Thank you email fields not yet migrated, creating contact without them for {hubspot_id}")
+                        # Create contact without thank you email fields
+                        contact = HubspotContact(
+                            user_id=user_id,
+                            hubspot_id=hubspot_id,
+                            firstname=properties.get('firstname'),
+                            lastname=properties.get('lastname'),
+                            email=properties.get('email'),
+                            phone=properties.get('phone'),
+                            company=properties.get('company'),
+                            jobtitle=properties.get('jobtitle'),
+                            industry=properties.get('industry'),
+                            lifecyclestage=properties.get('lifecyclestage'),
+                            lead_status=properties.get('lead_status'),
+                            notes_last_contacted=notes_last_contacted,
+                            notes_last_activity_date=notes_last_activity_date,
+                            num_notes=_parse_int(properties.get('num_notes')),
+                            properties=json.dumps(properties)
+                        )
+                    else:
+                        raise te
                 
                 session.add(contact)
                 new_contacts.append(contact)
@@ -743,3 +772,160 @@ def _sync_all_users_hubspot_sync() -> Dict[str, Any]:
             "sync_results": sync_results,
             "synced_at": datetime.utcnow().isoformat()
         } 
+
+@celery_app.task(bind=True, max_retries=3)
+def send_thank_you_emails_to_new_contacts(self, user_id: str = None):
+    """Send thank you emails to new HubSpot contacts who haven't received them yet"""
+    try:
+        logger.info(f"Starting thank you email sending for new HubSpot contacts")
+        
+        # Run sync function
+        result = _send_thank_you_emails_sync(user_id)
+        
+        logger.info(f"Thank you email sending completed: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Thank you email sending failed: {str(e)}")
+        
+        # Retry with exponential backoff
+        if self.request.retries < self.max_retries:
+            retry_delay = 2 ** self.request.retries
+            raise self.retry(countdown=retry_delay, exc=e)
+        else:
+            raise e
+
+def _send_thank_you_emails_sync(user_id: str = None) -> Dict[str, Any]:
+    """Sync implementation of sending thank you emails to new contacts"""
+    with SyncSessionLocal() as session:
+        # Build query for users to process
+        if user_id:
+            # Process specific user
+            result = session.execute(
+                select(User).where(
+                    User.id == user_id,
+                    User.hubspot_access_token.is_not(None),
+                    User.google_access_token.is_not(None)  # Need Gmail to send emails
+                )
+            )
+            users = result.scalars().all()
+        else:
+            # Process all users with both HubSpot and Gmail access
+            result = session.execute(
+                select(User).where(
+                    User.hubspot_access_token.is_not(None),
+                    User.google_access_token.is_not(None)
+                )
+            )
+            users = result.scalars().all()
+        
+        total_emails_sent = 0
+        total_contacts_processed = 0
+        errors = []
+        
+        for user in users:
+            try:
+                # Get contacts that need thank you emails
+                contacts_result = session.execute(
+                    select(HubspotContact).where(
+                        HubspotContact.user_id == user.id,
+                        HubspotContact.thank_you_email_sent == False,
+                        HubspotContact.email.is_not(None),
+                        HubspotContact.email != ""
+                    ).order_by(HubspotContact.created_at.desc())
+                )
+                contacts_needing_emails = contacts_result.scalars().all()
+                
+                if not contacts_needing_emails:
+                    logger.info(f"No new contacts need thank you emails for user {user.email}")
+                    continue
+                
+                logger.info(f"Found {len(contacts_needing_emails)} contacts needing thank you emails for user {user.email}")
+                
+                for contact in contacts_needing_emails:
+                    try:
+                        # Send thank you email
+                        email_sent = _send_thank_you_email_to_contact(user, contact)
+                        
+                        if email_sent:
+                            # Mark as sent
+                            contact.thank_you_email_sent = True
+                            contact.thank_you_email_sent_at = datetime.utcnow()
+                            total_emails_sent += 1
+                            logger.info(f"✅ Thank you email sent to {contact.email}")
+                        else:
+                            logger.warning(f"⚠️ Failed to send thank you email to {contact.email}")
+                        
+                        total_contacts_processed += 1
+                        
+                        # Commit in batches to avoid long transactions
+                        if total_contacts_processed % 5 == 0:
+                            session.commit()
+                            
+                    except Exception as contact_error:
+                        error_msg = f"Failed to process contact {contact.email} for user {user.email}: {str(contact_error)}"
+                        errors.append(error_msg)
+                        logger.error(error_msg)
+                        continue
+                
+                # Final commit for this user
+                session.commit()
+                logger.info(f"✅ Processed {len(contacts_needing_emails)} contacts for user {user.email}")
+                
+            except Exception as user_error:
+                error_msg = f"Failed to process thank you emails for user {user.email}: {str(user_error)}"
+                errors.append(error_msg)
+                logger.error(error_msg)
+                continue
+        
+        result = {
+            "users_processed": len(users),
+            "contacts_processed": total_contacts_processed,
+            "emails_sent": total_emails_sent,
+            "errors": errors,
+            "processed_at": datetime.utcnow().isoformat()
+        }
+        
+        logger.info(f"✅ Thank you email sending completed: {result}")
+        return result
+
+def _send_thank_you_email_to_contact(user: User, contact: HubspotContact) -> bool:
+    """Send a thank you email to a specific contact"""
+    try:
+        # Build personalized email content
+        contact_name = _get_contact_display_name(contact)
+        
+        subject = "Thank you for being a customer"
+        body = f"Hello {contact_name},\n\nThank you for being a customer."
+        
+        # Use existing email sending infrastructure
+        from tasks.gmail_tasks import _send_email_sync
+        
+        result = _send_email_sync(
+            user_id=user.id,
+            to=contact.email,
+            subject=subject,
+            body=body
+        )
+        
+        return bool(result and result.get("message_id"))
+        
+    except Exception as e:
+        logger.error(f"Failed to send thank you email to {contact.email}: {str(e)}")
+        return False
+
+def _get_contact_display_name(contact: HubspotContact) -> str:
+    """Get a nice display name for the contact"""
+    if contact.firstname and contact.lastname:
+        return f"{contact.firstname} {contact.lastname}"
+    elif contact.firstname:
+        return contact.firstname
+    elif contact.lastname:
+        return contact.lastname
+    elif contact.email:
+        # Extract name from email if available
+        name_part = contact.email.split('@')[0]
+        # Convert dots and underscores to spaces and title case
+        return name_part.replace('.', ' ').replace('_', ' ').title()
+    else:
+        return "Valued Customer" 

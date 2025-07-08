@@ -127,6 +127,10 @@ class HubspotContact(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # Thank you email tracking
+    thank_you_email_sent = Column(Boolean, default=False)
+    thank_you_email_sent_at = Column(DateTime, nullable=True)
+    
     # Vector embedding for RAG
     embedding = Column(Vector(1536), nullable=True)
     
@@ -531,3 +535,56 @@ async def create_user(user_data: dict) -> dict:
             "created_at": user.created_at,
             "updated_at": user.updated_at,
         } 
+
+async def migrate_add_thank_you_email_fields():
+    """Add thank you email tracking fields to existing hubspot_contacts table"""
+    try:
+        from sqlalchemy import text
+        
+        async with AsyncSessionLocal() as session:
+            # Check if columns already exist
+            result = await session.execute(text("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'hubspot_contacts' AND column_name = 'thank_you_email_sent'
+            """))
+            
+            existing_column = result.scalar_one_or_none()
+            
+            if existing_column:
+                logger.info("Thank you email fields already exist, skipping migration")
+                return
+            
+            logger.info("Adding thank you email tracking fields to hubspot_contacts table...")
+            
+            # Add new columns with proper error handling
+            try:
+                await session.execute(text("""
+                    ALTER TABLE hubspot_contacts 
+                    ADD COLUMN IF NOT EXISTS thank_you_email_sent BOOLEAN DEFAULT FALSE,
+                    ADD COLUMN IF NOT EXISTS thank_you_email_sent_at TIMESTAMP
+                """))
+                
+                await session.commit()
+                logger.info("✅ Successfully added thank you email tracking fields")
+                
+            except Exception as alter_error:
+                logger.error(f"Error during ALTER TABLE: {str(alter_error)}")
+                await session.rollback()
+                
+                # Check if the error is because columns already exist
+                result = await session.execute(text("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'hubspot_contacts' 
+                    AND column_name IN ('thank_you_email_sent', 'thank_you_email_sent_at')
+                """))
+                
+                existing_columns = [row[0] for row in result.fetchall()]
+                
+                if len(existing_columns) >= 2:
+                    logger.info("✅ Thank you email fields appear to exist already after error - migration successful")
+                else:
+                    raise alter_error
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to add thank you email fields: {str(e)}")
+        raise e 

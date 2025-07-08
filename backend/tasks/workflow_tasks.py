@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import sessionmaker
 
 from database import Workflow, WorkflowStep, Event
-from services.workflow_engine import workflow_engine, WorkflowStatus
+from services.workflow_engine import proactive_workflow_engine, WorkflowStatus
 from celery_app import celery_app
 from config import get_settings
 
@@ -33,15 +33,29 @@ def execute_workflow(self, workflow_id: str):
         asyncio.set_event_loop(loop)
         
         try:
+            # First get the workflow to extract user_id
+            async def get_workflow_user():
+                from database import AsyncSessionLocal
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(
+                        select(Workflow).where(Workflow.id == workflow_id)
+                    )
+                    workflow = result.scalar_one_or_none()
+                    return workflow.user_id if workflow else None
+            
+            user_id = loop.run_until_complete(get_workflow_user())
+            if not user_id:
+                raise Exception(f"Workflow {workflow_id} not found")
+            
             # Run async workflow execution
-            result = loop.run_until_complete(workflow_engine.start_workflow(workflow_id))
+            result = loop.run_until_complete(proactive_workflow_engine._execute_workflow(workflow_id, user_id))
         finally:
             loop.close()
         
         logger.info(f"Workflow {workflow_id} execution completed: {result}")
         return {
             "workflow_id": workflow_id,
-            "success": result,
+            "success": result.get("status") == "completed",
             "completed_at": datetime.utcnow().isoformat()
         }
         
@@ -53,13 +67,8 @@ def execute_workflow(self, workflow_id: str):
             retry_delay = 2 ** self.request.retries
             raise self.retry(countdown=retry_delay, exc=e)
         else:
-            # Mark workflow as failed using a new loop
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(workflow_engine._mark_workflow_failed(workflow_id, str(e)))
-            finally:
-                loop.close()
+            # Mark workflow as failed by updating database directly
+            _mark_workflow_failed(workflow_id, str(e))
             raise e
 
 @celery_app.task(bind=True, max_retries=2)
@@ -73,15 +82,21 @@ def resume_workflow(self, workflow_id: str, resume_data: Dict[str, Any] = None):
         asyncio.set_event_loop(loop)
         
         try:
-            # Run async workflow resumption
-            result = loop.run_until_complete(workflow_engine.resume_workflow(workflow_id, resume_data))
+            # Use continue_workflow_from_response which is similar to resume
+            result = loop.run_until_complete(
+                proactive_workflow_engine.continue_workflow_from_response(
+                    workflow_id, 
+                    resume_data.get("user_id", ""), 
+                    resume_data or {}
+                )
+            )
         finally:
             loop.close()
         
         logger.info(f"Workflow {workflow_id} resumption completed: {result}")
         return {
             "workflow_id": workflow_id,
-            "success": result,
+            "success": result.get("status") in ["completed", "continued"],
             "resumed_at": datetime.utcnow().isoformat()
         }
         
@@ -100,7 +115,7 @@ def create_and_execute_workflow(
     self, 
     user_id: str, 
     name: str, 
-    steps: List[Dict[str, Any]], 
+    workflow_type: str,
     input_data: Dict[str, Any] = None,
     triggered_by_event_id: str = None
 ):
@@ -113,30 +128,47 @@ def create_and_execute_workflow(
         asyncio.set_event_loop(loop)
         
         try:
-            # Create workflow
-            workflow_id = loop.run_until_complete(workflow_engine.create_workflow(
-                user_id=user_id,
-                name=name,
-                steps=steps,
-                input_data=input_data,
-                triggered_by_event_id=triggered_by_event_id
-            ))
-            
-            # Execute workflow immediately
-            result = loop.run_until_complete(workflow_engine.start_workflow(workflow_id))
+            # Use our start_workflow method which creates and executes
+            result = loop.run_until_complete(
+                proactive_workflow_engine.start_workflow(
+                    workflow_type=workflow_type,
+                    user_id=user_id,
+                    input_data=input_data or {},
+                    name=name
+                )
+            )
         finally:
             loop.close()
         
-        logger.info(f"Workflow {workflow_id} created and executed: {result}")
+        logger.info(f"Workflow created and executed: {result}")
         return {
-            "workflow_id": workflow_id,
-            "success": result,
+            "workflow_id": result.get("workflow_id"),
+            "success": result.get("status") in ["completed", "running", "waiting"],
             "created_at": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
         logger.error(f"Failed to create and execute workflow: {str(e)}")
         raise e
+
+def _mark_workflow_failed(workflow_id: str, error_message: str):
+    """Helper function to mark workflow as failed"""
+    try:
+        with SyncSessionLocal() as session:
+            session.execute(
+                update(Workflow)
+                .where(Workflow.id == workflow_id)
+                .values(
+                    status=WorkflowStatus.FAILED.value,
+                    error_message=error_message,
+                    completed_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+            )
+            session.commit()
+            logger.info(f"Marked workflow {workflow_id} as failed: {error_message}")
+    except Exception as e:
+        logger.error(f"Failed to mark workflow as failed: {str(e)}")
 
 @celery_app.task(bind=True)
 def check_workflow_timeouts(self):

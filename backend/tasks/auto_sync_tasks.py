@@ -28,40 +28,39 @@ SyncSessionLocal = sessionmaker(bind=sync_engine)
 @celery_app.task(bind=True, max_retries=3)
 def auto_sync_all_users(self):
     """
-    Periodic task to sync data for all users every 5 minutes
+    Periodic task to sync all users' data from Gmail and HubSpot
+    Runs every 30 minutes via Celery Beat scheduler
     """
     try:
-        logger.info("🔄 Starting auto-sync for all users")
+        logger.info("🚀 Starting auto-sync for all users")
         
-        # Get all users who have connected their accounts
         with SyncSessionLocal() as session:
-            # Query for users who have Google or HubSpot tokens
+            # Get all users with OAuth tokens
             result = session.execute(
                 select(User).where(
-                    (User.google_access_token.is_not(None)) |
+                    (User.google_access_token.is_not(None)) | 
                     (User.hubspot_access_token.is_not(None))
                 )
             )
             users = result.scalars().all()
             
             if not users:
-                logger.info("No users with connected accounts found")
+                logger.info("📭 No users with OAuth tokens found")
                 return {
                     "users_processed": 0,
                     "gmail_synced": 0,
                     "hubspot_contacts_synced": 0,
                     "hubspot_deals_synced": 0,
                     "hubspot_companies_synced": 0,
+                    "thank_you_emails_sent": 0,
                     "errors": []
                 }
             
-            logger.info(f"Found {len(users)} users with connected accounts")
-            
-            # Track results
             gmail_synced = 0
             hubspot_contacts_synced = 0
             hubspot_deals_synced = 0
             hubspot_companies_synced = 0
+            thank_you_emails_queued = 0
             errors = []
             
             # Queue sync tasks for each user
@@ -84,6 +83,13 @@ def auto_sync_all_users(self):
                         hubspot_companies_synced += 1
                         logger.info(f"🔗 HubSpot sync queued for user {user.id}")
                     
+                    # Send thank you emails to new HubSpot contacts (if user has both integrations)
+                    if user.hubspot_access_token and user.google_access_token:
+                        from tasks.hubspot_tasks import send_thank_you_emails_to_new_contacts
+                        thank_you_result = send_thank_you_emails_to_new_contacts.delay(user.id)
+                        thank_you_emails_queued += 1
+                        logger.info(f"💌 Thank you email check queued for user {user.id}")
+                    
                 except Exception as user_error:
                     error_msg = f"Failed to queue sync for user {user.id}: {str(user_error)}"
                     errors.append(error_msg)
@@ -95,6 +101,7 @@ def auto_sync_all_users(self):
                 "hubspot_contacts_synced": hubspot_contacts_synced,
                 "hubspot_deals_synced": hubspot_deals_synced,
                 "hubspot_companies_synced": hubspot_companies_synced,
+                "thank_you_emails_queued": thank_you_emails_queued,
                 "errors": errors
             }
             
@@ -481,11 +488,20 @@ def robust_trigger_sync(user_id: str, services: list = None):
             # Sync specific services
             results = {}
             for service in services:
-                result = asyncio.run(sync_manager.sync_single_service(user_id, service))
-                results[service] = {
-                    "status": result.status.value,
-                    "message": result.message
-                }
+                if service == "thank_you_emails":
+                    # Handle thank you emails separately
+                    from tasks.hubspot_tasks import send_thank_you_emails_to_new_contacts
+                    thank_you_result = send_thank_you_emails_to_new_contacts.delay(user_id)
+                    results[service] = {
+                        "status": "queued",
+                        "message": f"Thank you email task queued: {thank_you_result.id}"
+                    }
+                else:
+                    result = asyncio.run(sync_manager.sync_single_service(user_id, service))
+                    results[service] = {
+                        "status": result.status.value,
+                        "message": result.message
+                    }
         else:
             # Sync all services
             sync_results = asyncio.run(sync_manager.sync_all_data(user_id))
@@ -495,6 +511,14 @@ def robust_trigger_sync(user_id: str, services: list = None):
                     "message": r.message if hasattr(r, 'message') else str(r)
                 }
                 for service, r in sync_results.items()
+            }
+            
+            # Also trigger thank you emails for complete sync
+            from tasks.hubspot_tasks import send_thank_you_emails_to_new_contacts
+            thank_you_result = send_thank_you_emails_to_new_contacts.delay(user_id)
+            results["thank_you_emails"] = {
+                "status": "queued",
+                "message": f"Thank you email task queued: {thank_you_result.id}"
             }
         
         logger.info(f"✅ Robust sync completed for user {user_id}")

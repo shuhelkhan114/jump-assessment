@@ -8,7 +8,7 @@ from typing import Optional
 from config import get_settings
 from database import init_db, get_db
 from auth import get_current_user
-from routers import auth, chat, integrations
+from routers import auth, chat, integrations, proactive
 
 # Configure structured logging
 structlog.configure(
@@ -34,9 +34,22 @@ logger = structlog.get_logger()
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Financial Agent API")
+    
+    # Initialize database first
     await init_db()
     
-    # Start Gmail polling service
+    # Run database migrations IMMEDIATELY after database init and BEFORE any services
+    try:
+        from database import migrate_add_thank_you_email_fields
+        logger.info("🔄 Running database migrations...")
+        await migrate_add_thank_you_email_fields()
+        logger.info("✅ Database migrations completed successfully")
+    except Exception as e:
+        logger.error(f"❌ Database migration failed: {str(e)}")
+        # Don't start the app if migrations fail
+        raise e
+    
+    # Start Gmail polling service AFTER migrations are complete
     try:
         from services.gmail_polling_service import gmail_polling_service
         import asyncio
@@ -86,6 +99,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/auth", tags=["authentication"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
 app.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
+app.include_router(proactive.router, prefix="/api", tags=["proactive"])
 
 @app.get("/")
 async def root():

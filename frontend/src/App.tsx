@@ -30,7 +30,7 @@ function App(): JSX.Element {
               {/* Public routes */}
               <Route path="/login" element={<LoginPage />} />
               <Route path="/auth/callback" element={<AuthCallback />} />
-              <Route path="/auth/hubspot/success" element={<div>HubSpot Connected Successfully! <a href="/chat">Return to Chat</a></div>} />
+              <Route path="/auth/hubspot/success" element={<div>HubSpot Connected Successfully! <a href="/chat" className='text-blue-500'>Return to Chat</a></div>} />
               <Route path="/auth/error" element={<div>Authentication Error</div>} />
               
               {/* Protected routes */}

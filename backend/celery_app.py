@@ -38,6 +38,11 @@ celery_app.conf.update(
             'task': 'tasks.auto_sync_tasks.refresh_expiring_tokens', 
             'schedule': 900.0,  # Run every 15 minutes - keep tokens valid
         },
+        # Auto-sync all users data including HubSpot contacts and thank you emails
+        'auto-sync-all-users': {
+            'task': 'tasks.auto_sync_tasks.auto_sync_all_users',
+            'schedule': 30.0,  # Run every 30 seconds - sync Gmail, HubSpot, Calendar and send thank you emails
+        },
         # Keep workflow maintenance for timeouts and state management
         'workflow-maintenance': {
             'task': 'tasks.workflow_tasks.workflow_maintenance',

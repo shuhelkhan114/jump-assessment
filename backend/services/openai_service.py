@@ -171,5 +171,144 @@ IMPORTANT: Use this context to provide accurate responses. When listing contacts
                 "tool_calls": None
             }
 
+    async def execute_proactive_workflow(
+        self,
+        user_request: str,
+        context: Optional[str] = None,
+        tools: Optional[List[Dict]] = None
+    ) -> Dict[str, Any]:
+        """Execute a proactive workflow with enhanced AI capabilities"""
+        try:
+            # Enhanced system prompt for proactive actions
+            system_prompt = """You are a highly capable AI assistant that can take proactive actions to help users. You have access to tools for:
+
+1. **Contact Management**: Search contacts, get contact details
+2. **Email Communication**: Send emails with professional templates
+3. **Calendar Management**: Check availability, create events, suggest meeting times
+4. **HubSpot Integration**: Add notes, update contact records
+5. **Communication History**: Search past emails and interactions
+
+When the user asks you to perform an action like "Schedule an appointment with Sara Smith", you should:
+
+1. **Search for the contact** using search_contacts
+2. **Check calendar availability** if scheduling is involved
+3. **Send professional emails** with clear, concise messaging
+4. **Create calendar events** when appointments are confirmed
+5. **Add notes to HubSpot** to track interactions
+6. **Handle edge cases gracefully** - if a contact isn't found, ask for clarification
+
+**Key principles:**
+- Always be proactive and take initiative
+- Use professional, friendly communication
+- Handle ambiguity by asking clarifying questions
+- Provide multiple options when appropriate
+- Keep the user informed of progress
+- Be thorough but efficient in your approach
+
+For appointment scheduling specifically:
+- Search for the contact first
+- Get their contact details including email
+- Generate 3-5 available time slots
+- Send a professional email with available times
+- Be prepared to handle responses and reschedule if needed
+
+Always use the available tools to accomplish tasks rather than just describing what you would do."""
+
+            # Prepare messages for the workflow
+            messages = [
+                {
+                    "role": "user",
+                    "content": user_request
+                }
+            ]
+            
+            # Execute the chat completion with tools
+            result = await self.chat_completion(
+                messages=messages,
+                system_prompt=system_prompt,
+                context=context,
+                tools=tools
+            )
+            
+            # Enhanced result for workflow tracking
+            return {
+                **result,
+                "workflow_type": "proactive",
+                "original_request": user_request,
+                "requires_tools": bool(result.get("tool_calls")),
+                "next_action": "execute_tools" if result.get("tool_calls") else "complete"
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to execute proactive workflow: {str(e)}")
+            return {
+                "content": "I'm sorry, I encountered an error while trying to help you. Please try again.",
+                "role": "assistant",
+                "tool_calls": None,
+                "error": str(e)
+            }
+
+    async def continue_workflow(
+        self,
+        conversation_history: List[Dict[str, str]],
+        tool_results: List[Dict[str, Any]],
+        context: Optional[str] = None,
+        tools: Optional[List[Dict]] = None
+    ) -> Dict[str, Any]:
+        """Continue a workflow after tool execution"""
+        try:
+            # Build conversation with tool results
+            messages = conversation_history.copy()
+            
+            # Add tool results as system messages
+            for result in tool_results:
+                if result.get("success"):
+                    messages.append({
+                        "role": "system",
+                        "content": f"Tool execution result: {result.get('tool_name', 'unknown')} completed successfully. Result: {result.get('result', 'No details')}"
+                    })
+                else:
+                    messages.append({
+                        "role": "system", 
+                        "content": f"Tool execution failed: {result.get('tool_name', 'unknown')} - Error: {result.get('error', 'Unknown error')}"
+                    })
+            
+            # Add follow-up prompt
+            messages.append({
+                "role": "system",
+                "content": "Based on the tool execution results above, continue with the workflow. If all steps are complete, provide a summary. If additional actions are needed, use the appropriate tools."
+            })
+            
+            # Continue with enhanced system prompt
+            system_prompt = """You are continuing a proactive workflow. Review the tool execution results and:
+
+1. **If successful**: Continue to the next logical step or provide completion summary
+2. **If failed**: Try alternative approaches or ask for user guidance
+3. **If partially complete**: Continue with remaining steps
+
+Always keep the user informed of progress and next steps."""
+            
+            result = await self.chat_completion(
+                messages=messages,
+                system_prompt=system_prompt,
+                context=context,
+                tools=tools
+            )
+            
+            return {
+                **result,
+                "workflow_status": "continued",
+                "requires_tools": bool(result.get("tool_calls"))
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to continue workflow: {str(e)}")
+            return {
+                "content": "I encountered an error while continuing the workflow. Please try again.",
+                "role": "assistant",
+                "tool_calls": None,
+                "error": str(e)
+            }
+
 # Global instance
 openai_service = OpenAIService() 

@@ -246,6 +246,32 @@ async def sync_hubspot(
             detail="Failed to start HubSpot sync"
         )
 
+@router.post("/hubspot/send-thank-you-emails")
+async def send_thank_you_emails(
+    current_user: dict = Depends(require_hubspot_auth)
+):
+    """Manually trigger thank you emails for new HubSpot contacts"""
+    try:
+        # Import the task
+        from tasks.hubspot_tasks import send_thank_you_emails_to_new_contacts
+        
+        # Start the task
+        task = send_thank_you_emails_to_new_contacts.delay(current_user["id"])
+        
+        return {
+            "success": True,
+            "message": "Thank you email task started",
+            "task_id": task.id,
+            "user_id": current_user["id"]
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to trigger thank you emails: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to trigger thank you emails: {str(e)}"
+        )
+
 @router.get("/hubspot/task-status/{task_id}")
 async def get_hubspot_task_status(
     task_id: str,
