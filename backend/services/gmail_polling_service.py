@@ -266,6 +266,13 @@ class GmailPollingService:
             if created_contact:
                 logger.info(f"✅ Successfully created HubSpot contact for {email}")
                 
+                # Add email content as note to the contact
+                await self._add_email_note_to_contact(
+                    contact_id=created_contact.get("id"),
+                    email_data=email_data,
+                    user_id=user.id
+                )
+                
                 # Save contact to local database
                 await self._save_contact_to_db(user.id, email, created_contact)
             else:
@@ -300,6 +307,59 @@ class GmailPollingService:
         except Exception as e:
             logger.error(f"❌ Error extracting sender name: {str(e)}")
             return {"first_name": "", "last_name": ""}
+    
+    async def _add_email_note_to_contact(self, contact_id: str, email_data: Dict[str, Any], user_id: str):
+        """Add email content as a note to the HubSpot contact"""
+        try:
+            # Extract email content for the note
+            subject = email_data.get("subject", "No Subject")
+            content = email_data.get("content", "")
+            sender = email_data.get("sender", "Unknown")
+            received_at = email_data.get("received_at", datetime.utcnow())
+            
+            # Format the received date nicely
+            if isinstance(received_at, str):
+                received_at = datetime.fromisoformat(received_at.replace('Z', '+00:00'))
+            elif received_at is None:
+                received_at = datetime.utcnow()
+            
+            formatted_date = received_at.strftime("%B %d, %Y at %I:%M %p")
+            
+            # Create formatted note content
+            note_content = f"""📧 Initial Contact via Email
+Received: {formatted_date}
+From: {sender}
+Subject: {subject}
+
+Email Content:
+{content[:1000]}{"..." if len(content) > 1000 else ""}
+
+This contact was automatically created from an incoming email."""
+            
+            # Create the note using HubSpot engagements API
+            note_data = {
+                "engagement": {
+                    "type": "NOTE"
+                },
+                "metadata": {
+                    "body": note_content
+                },
+                "associations": {
+                    "contactIds": [contact_id]
+                }
+            }
+            
+            result = await hubspot_service.create_engagement(note_data)
+            
+            if result and result.get("_status") == "created":
+                logger.info(f"✅ Added email note to HubSpot contact {contact_id}")
+            else:
+                logger.warning(f"⚠️ Note creation result unclear for contact {contact_id}: {result}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error adding email note to contact {contact_id}: {str(e)}")
+            # Don't fail the whole contact creation process if note fails
+            pass
     
     async def _save_contact_to_db(self, user_id: str, email: str, hubspot_contact: Dict[str, Any]):
         """Save the created contact to local database"""

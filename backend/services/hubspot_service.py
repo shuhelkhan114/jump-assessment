@@ -408,32 +408,107 @@ class HubSpotService:
             if not self.client:
                 raise Exception("HubSpot service not initialized")
             
-            # Note: HubSpot v3 API doesn't support engagements directly
-            # We'll add a note to the contact's timeline via associations
-            # For now, we'll return a mock response to indicate the note was created
+            engagement_type = engagement_data.get("engagement", {}).get("type", "NOTE")
             
-            logger.info(f"Creating engagement in HubSpot: {engagement_data}")
-            
-            # In a full implementation, you would:
-            # 1. Create the engagement via the engagements API
-            # 2. Associate it with the contact
-            # For now, we'll simulate success
-            
-            return {
-                "id": f"note_{datetime.now().isoformat()}",
-                "engagement": {
-                    "id": f"note_{datetime.now().isoformat()}",
-                    "type": "NOTE"
-                },
-                "metadata": engagement_data.get("metadata", {}),
-                "associations": engagement_data.get("associations", {}),
-                "_status": "created",
-                "_message": "Note created successfully"
-            }
+            if engagement_type == "NOTE":
+                # Create a note using HubSpot's notes API
+                note_body = engagement_data.get("metadata", {}).get("body", "")
+                contact_ids = engagement_data.get("associations", {}).get("contactIds", [])
+                
+                if not note_body:
+                    logger.warning("Note body is empty, skipping note creation")
+                    return {"_status": "skipped", "_message": "Note body is empty"}
+                
+                if not contact_ids:
+                    logger.warning("No contact IDs provided for note association")
+                    return {"_status": "skipped", "_message": "No contact IDs provided"}
+                
+                # Create note data for HubSpot API
+                note_data = {
+                    "properties": {
+                        "hs_note_body": note_body,
+                        "hs_timestamp": str(int(datetime.now().timestamp() * 1000))  # Current timestamp in ms
+                    }
+                }
+                
+                # Create the note
+                response = await self._make_request_with_retry("POST", "/crm/v3/objects/notes", json=note_data)
+                
+                if response.status_code == 201:
+                    note_result = response.json()
+                    note_id = note_result.get("id")
+                    
+                    logger.info(f"✅ Created note in HubSpot: {note_id}")
+                    
+                    # Associate note with contacts
+                    association_success = True
+                    for contact_id in contact_ids:
+                        try:
+                            # Create association between note and contact
+                            association_data = {
+                                "inputs": [{
+                                    "from": {"id": note_id},
+                                    "to": {"id": contact_id},
+                                    "type": "note_to_contact"
+                                }]
+                            }
+                            
+                            assoc_response = await self._make_request_with_retry(
+                                "PUT", 
+                                f"/crm/v3/associations/notes/contacts/batch/create",
+                                json=association_data
+                            )
+                            
+                            if assoc_response.status_code in [200, 201]:
+                                logger.info(f"✅ Associated note {note_id} with contact {contact_id}")
+                            else:
+                                logger.warning(f"⚠️ Failed to associate note {note_id} with contact {contact_id}: {assoc_response.status_code}")
+                                association_success = False
+                                
+                        except Exception as assoc_error:
+                            logger.error(f"❌ Error associating note {note_id} with contact {contact_id}: {str(assoc_error)}")
+                            association_success = False
+                    
+                    return {
+                        "id": note_id,
+                        "engagement": {
+                            "id": note_id,
+                            "type": "NOTE"
+                        },
+                        "metadata": {"body": note_body},
+                        "associations": {"contactIds": contact_ids},
+                        "_status": "created",
+                        "_message": f"Note created successfully{'with associations' if association_success else ' but some associations failed'}"
+                    }
+                    
+                else:
+                    logger.error(f"HubSpot API error creating note: {response.status_code} - {response.text}")
+                    return {
+                        "_status": "error",
+                        "_message": f"Failed to create note: {response.status_code}"
+                    }
+            else:
+                # For other engagement types, return the mock response for now
+                logger.info(f"Creating {engagement_type} engagement (mock): {engagement_data}")
+                
+                return {
+                    "id": f"{engagement_type.lower()}_{datetime.now().isoformat()}",
+                    "engagement": {
+                        "id": f"{engagement_type.lower()}_{datetime.now().isoformat()}",
+                        "type": engagement_type
+                    },
+                    "metadata": engagement_data.get("metadata", {}),
+                    "associations": engagement_data.get("associations", {}),
+                    "_status": "created",
+                    "_message": f"{engagement_type} created successfully"
+                }
                 
         except Exception as e:
             logger.error(f"Failed to create engagement: {str(e)}")
-            raise
+            return {
+                "_status": "error", 
+                "_message": f"Failed to create engagement: {str(e)}"
+            }
 
     async def close(self):
         """Close the HTTP client"""
