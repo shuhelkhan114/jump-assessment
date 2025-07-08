@@ -1,8 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import structlog
-from datetime import datetime
+from datetime import datetime, timedelta
+import base64
+import json
+import hmac
+import hashlib
 
 from auth import get_current_user, require_google_auth, require_hubspot_auth
 from database import AsyncSessionLocal, Email, HubspotContact, HubspotDeal, HubspotCompany, select
@@ -48,6 +52,10 @@ class HealthCheckResult(BaseModel):
     overall_status: str
     services: Dict[str, Dict[str, str]]
 
+class RobustSyncRequest(BaseModel):
+    force_refresh: bool = False
+    services: Optional[List[str]] = None
+
 class SystemStatusResult(BaseModel):
     timestamp: str
     uptime_seconds: float
@@ -63,6 +71,8 @@ class PerformanceRecommendations(BaseModel):
     system_health: str
     critical_issues: int
     total_operations: int
+
+# Integration Models
 
 @router.get("/sync-status")
 async def get_sync_status(current_user: dict = Depends(get_current_user)):
@@ -474,31 +484,6 @@ async def get_hubspot_summary(current_user: dict = Depends(get_current_user)):
             detail="Failed to get HubSpot summary"
         )
 
-# Background tasks
-async def sync_gmail_data(user_id: str):
-    """Background task to sync Gmail data"""
-    try:
-        logger.info(f"Starting Gmail sync for user {user_id}")
-        
-        # TODO: Implement Gmail API integration
-        # For now, just log the task
-        logger.info(f"Gmail sync completed for user {user_id}")
-        
-    except Exception as e:
-        logger.error(f"Gmail sync failed for user {user_id}: {str(e)}")
-
-async def sync_hubspot_data(user_id: str):
-    """Background task to sync HubSpot data"""
-    try:
-        logger.info(f"Starting HubSpot sync for user {user_id}")
-        
-        # TODO: Implement HubSpot API integration
-        # For now, just log the task
-        logger.info(f"HubSpot sync completed for user {user_id}")
-        
-    except Exception as e:
-        logger.error(f"HubSpot sync failed for user {user_id}: {str(e)}")
-
 # Helper functions
 async def get_gmail_sync_status(user_id: str) -> SyncStatus:
     """Get Gmail sync status"""
@@ -640,8 +625,7 @@ async def manual_sync(current_user: dict = Depends(get_current_user)):
 
 @router.post("/robust-sync")
 async def robust_manual_sync(
-    force_refresh: bool = False,
-    services: Optional[List[str]] = None,
+    request: RobustSyncRequest,
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -651,13 +635,13 @@ async def robust_manual_sync(
         from tasks.auto_sync_tasks import robust_trigger_sync
         
         # Trigger robust sync with optional service filtering
-        task = robust_trigger_sync.delay(current_user["id"], services)
+        task = robust_trigger_sync.delay(current_user["id"], request.services)
         
         return {
             "message": "Robust sync started",
             "task_id": task.id,
-            "force_refresh": force_refresh,
-            "services": services or "all"
+            "force_refresh": request.force_refresh,
+            "services": request.services or "all"
         }
         
     except Exception as e:
@@ -1115,3 +1099,67 @@ async def get_system_summary(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Failed to get system summary: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get system summary: {str(e)}") 
+
+@router.post("/gmail/polling/start")
+async def start_gmail_polling(current_user: dict = Depends(get_current_user)):
+    """Start Gmail polling service"""
+    try:
+        from tasks.gmail_polling_tasks import start_gmail_polling
+        
+        # Start the polling service as a background task
+        task = start_gmail_polling.delay()
+        
+        return {
+            "message": "Gmail polling service started",
+            "task_id": task.id,
+            "polling_interval": "10 seconds"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to start Gmail polling: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to start Gmail polling"
+        )
+
+@router.post("/gmail/polling/stop")
+async def stop_gmail_polling(current_user: dict = Depends(get_current_user)):
+    """Stop Gmail polling service"""
+    try:
+        from tasks.gmail_polling_tasks import stop_gmail_polling
+        
+        # Stop the polling service as a background task
+        task = stop_gmail_polling.delay()
+        
+        return {
+            "message": "Gmail polling service stopped",
+            "task_id": task.id
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to stop Gmail polling: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to stop Gmail polling"
+        )
+
+@router.get("/gmail/polling/status")
+async def get_gmail_polling_status(current_user: dict = Depends(get_current_user)):
+    """Get Gmail polling service status"""
+    try:
+        from tasks.gmail_polling_tasks import check_gmail_polling_status
+        
+        # Check the polling service status
+        task = check_gmail_polling_status.delay()
+        
+        return {
+            "message": "Gmail polling status checked",
+            "task_id": task.id
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to check Gmail polling status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check Gmail polling status"
+        ) 

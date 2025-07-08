@@ -29,7 +29,6 @@ export const Navbar: React.FC = () => {
       if (response.ok) {
         const result = await response.json();
         setSyncStatus('success');
-        console.log('Sync started:', result);
         
         // Reset status after 3 seconds
         setTimeout(() => setSyncStatus('idle'), 3000);
@@ -115,6 +114,17 @@ export const Navbar: React.FC = () => {
                   }`}
                 >
                   History
+                </Link>
+                
+                <Link
+                  to="/workflows"
+                  className={`px-3 py-2 rounded-md text-sm font-medium ${
+                    isActive('/workflows')
+                      ? 'bg-primary-100 text-primary-700'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Workflows
                 </Link>
               </div>
             </div>

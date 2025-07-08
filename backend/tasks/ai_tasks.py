@@ -5,45 +5,6 @@ import structlog
 logger = structlog.get_logger()
 
 @celery_app.task(bind=True)
-def generate_embeddings(self, text_data: list, user_id: str):
-    """Generate embeddings for text data using OpenAI"""
-    try:
-        logger.info(f"Generating embeddings for {len(text_data)} texts for user {user_id}")
-        
-        # TODO: Implement OpenAI embeddings generation
-        # This will involve:
-        # 1. Calling OpenAI embeddings API
-        # 2. Processing the response
-        # 3. Storing embeddings in database
-        
-        logger.info(f"Embeddings generated successfully for user {user_id}")
-        return {"status": "success", "user_id": user_id, "count": len(text_data)}
-        
-    except Exception as e:
-        logger.error(f"Embeddings generation failed: {str(e)}")
-        raise self.retry(exc=e, countdown=60, max_retries=3)
-
-@celery_app.task(bind=True)
-def process_ai_chat(self, user_id: str, message: str, context: dict = None):
-    """Process AI chat message with RAG"""
-    try:
-        logger.info(f"Processing AI chat for user {user_id}")
-        
-        # TODO: Implement AI chat processing
-        # This will involve:
-        # 1. RAG search for relevant context
-        # 2. Calling OpenAI Chat API
-        # 3. Processing tools/function calls
-        # 4. Storing conversation in database
-        
-        logger.info(f"AI chat processed successfully for user {user_id}")
-        return {"status": "success", "user_id": user_id, "message": "Chat processed"}
-        
-    except Exception as e:
-        logger.error(f"AI chat processing failed: {str(e)}")
-        raise self.retry(exc=e, countdown=30, max_retries=3)
-
-@celery_app.task(bind=True)
 def execute_ai_action(self, user_id: str, action_type: str, action_data: dict):
     """Execute AI-requested actions (send email, create meeting, etc.)"""
     try:
@@ -204,14 +165,14 @@ def _execute_create_hubspot_contact(user_id: str, action_data: dict) -> dict:
         email = action_data.get("email")
         firstname = action_data.get("firstname")
         lastname = action_data.get("lastname")
-        company = action_data.get("company", "")
-        jobtitle = action_data.get("jobtitle", "")
-        phone = action_data.get("phone", "")
+        company = action_data.get("company")
+        jobtitle = action_data.get("jobtitle")
+        phone = action_data.get("phone")
         
-        if not all([email, firstname, lastname]):
-            raise ValueError("Missing required contact parameters: email, firstname, lastname")
+        if not email:
+            raise ValueError("Email is required to create HubSpot contact")
         
-        # Get user with HubSpot OAuth token (synchronous database access for Celery)
+        # Get user with OAuth tokens (synchronous database access for Celery)
         settings = get_settings()
         sync_engine = create_engine(settings.database_url, echo=False)
         SyncSessionLocal = sessionmaker(bind=sync_engine)
@@ -229,18 +190,17 @@ def _execute_create_hubspot_contact(user_id: str, action_data: dict) -> dict:
                 raise Exception(f"User {user_id} has no HubSpot access token")
             
             # Initialize HubSpot service
-            hubspot_service = HubSpotService()
-            if not hubspot_service.initialize_service(user.hubspot_access_token):
-                raise Exception("Failed to initialize HubSpot service")
+            hubspot_service = HubSpotService(user.hubspot_access_token)
             
-            # Prepare contact data for HubSpot
+            # Prepare contact data
             contact_data = {
-                "email": email,
-                "firstname": firstname,
-                "lastname": lastname,
+                "email": email
             }
             
-            # Add optional fields if provided
+            if firstname:
+                contact_data["firstname"] = firstname
+            if lastname:
+                contact_data["lastname"] = lastname
             if company:
                 contact_data["company"] = company
             if jobtitle:
@@ -425,20 +385,4 @@ def _execute_get_calendar_schedule(user_id: str, action_data: dict) -> dict:
         
     except Exception as e:
         logger.error(f"Failed to get calendar schedule: {str(e)}")
-        raise e
-
-@celery_app.task(bind=True)
-def update_vector_search_index(self, user_id: str, content_type: str):
-    """Update vector search index for a user"""
-    try:
-        logger.info(f"Updating vector search index for user {user_id}, type: {content_type}")
-        
-        # TODO: Implement vector index updates
-        # This will refresh embeddings and optimize search indices
-        
-        logger.info(f"Vector search index updated successfully")
-        return {"status": "success", "user_id": user_id, "content_type": content_type}
-        
-    except Exception as e:
-        logger.error(f"Vector search index update failed: {str(e)}")
-        raise self.retry(exc=e, countdown=60, max_retries=3) 
+        raise e 

@@ -233,26 +233,43 @@ class SyncManager:
         return {"contacts_synced": result.get("count", 0) if isinstance(result, dict) else 0}
     
     async def _get_user_integrations(self, user_id: str) -> Optional[Dict]:
-        """Get user integration status"""
-        try:
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(
-                    select(User).where(User.id == user_id)
-                )
-                user = result.scalar_one_or_none()
-                
-                if not user:
+        """Get user integration status with retry logic for connection issues"""
+        import asyncio
+        
+        for attempt in range(3):  # Up to 3 attempts
+            try:
+                # Use a fresh session for each attempt to avoid connection issues
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(
+                        select(User).where(User.id == user_id)
+                    )
+                    user = result.scalar_one_or_none()
+                    
+                    if not user:
+                        return None
+                    
+                    return {
+                        "has_google": bool(user.google_access_token and user.google_refresh_token),
+                        "has_hubspot": bool(user.hubspot_access_token and user.hubspot_refresh_token),
+                        "email": user.email,
+                        "name": user.name
+                    }
+            except Exception as e:
+                # Check if it's a connection/session issue
+                if "another operation is in progress" in str(e) or "InterfaceError" in str(e):
+                    if attempt < 2:  # Not the last attempt
+                        logger.warning(f"Database connection issue for user {user_id}, attempt {attempt + 1}: {str(e)}")
+                        await asyncio.sleep(0.1 * (attempt + 1))  # Exponential backoff
+                        continue
+                    else:
+                        logger.error(f"Failed to get user integrations for {user_id} after 3 attempts: {str(e)}")
+                        return None
+                else:
+                    # Non-connection error, don't retry
+                    logger.error(f"Failed to get user integrations for {user_id}: {str(e)}")
                     return None
-                
-                return {
-                    "has_google": bool(user.google_access_token and user.google_refresh_token),
-                    "has_hubspot": bool(user.hubspot_access_token and user.hubspot_refresh_token),
-                    "email": user.email,
-                    "name": user.name
-                }
-        except Exception as e:
-            logger.error(f"Failed to get user integrations for {user_id}: {str(e)}")
-            return None
+        
+        return None
     
     def _log_sync_summary(self, user_id: str, results: Dict[str, SyncResult]):
         """Log a summary of sync results"""
@@ -272,8 +289,7 @@ class SyncManager:
                 logger.warning(f"⚠️ {service}: {result.message}")
     
     async def get_last_sync_status(self, user_id: str) -> Dict[str, Any]:
-        """Get the last sync status for a user (could be extended to store in DB)"""
-        # For now, return a basic status - could be enhanced to store sync history
+        """Get the last sync status for a user"""
         user_info = await self._get_user_integrations(user_id)
         if not user_info:
             return {"error": "User not found"}

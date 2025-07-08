@@ -11,74 +11,6 @@ interface ChatMessage {
   tool_results?: ToolResult[];
 }
 
-// Tool Results Debug Component - Self-contained with its own toggle
-const ToolResultsDebug: React.FC<{ toolResults: ToolResult[] }> = ({ toolResults }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
-
-  if (!toolResults || toolResults.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="mt-3 border-t border-gray-200 pt-3">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center space-x-2 text-xs text-gray-600 hover:text-gray-800 transition-colors"
-      >
-        <svg 
-          className={`w-3 h-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`} 
-          fill="currentColor" 
-          viewBox="0 0 20 20"
-        >
-          <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
-        </svg>
-        <span className="font-medium">
-          Debug Info ({toolResults.length} action{toolResults.length !== 1 ? 's' : ''})
-        </span>
-        <span className="text-gray-400">
-          {isExpanded ? 'Hide' : 'Show'}
-        </span>
-      </button>
-      
-      {isExpanded && (
-        <div className="mt-2 space-y-2">
-          {toolResults.map((result, index) => (
-            <div key={index} className="bg-gray-50 rounded p-3 text-xs">
-              <div className="flex items-center space-x-2 mb-2">
-                <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                  result.status === 'success' 
-                    ? 'bg-green-100 text-green-800' 
-                    : 'bg-red-100 text-red-800'
-                }`}>
-                  {result.status === 'success' ? '✅' : '❌'} {result.tool}
-                </span>
-              </div>
-              
-              {result.status === 'success' && result.result && (
-                <div>
-                  <div className="font-medium text-gray-700 mb-1">Result:</div>
-                  <pre className="text-xs text-gray-600 whitespace-pre-wrap bg-white p-2 rounded border overflow-x-auto">
-                    {JSON.stringify(result.result, null, 2)}
-                  </pre>
-                </div>
-              )}
-              
-              {result.status === 'error' && result.error && (
-                <div>
-                  <div className="font-medium text-red-700 mb-1">Error:</div>
-                  <div className="text-red-600 bg-red-50 p-2 rounded">
-                    {result.error}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
-
 // HubSpot Integration Component
 const HubSpotIntegration: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
@@ -197,7 +129,7 @@ export const ChatPage: React.FC = () => {
           }
         }
       } catch (error) {
-        console.log('App load sync check failed (non-critical):', error);
+        // Non-critical error, continue normally
       }
     };
 
@@ -350,8 +282,6 @@ export const ChatPage: React.FC = () => {
     }
   };
 
-
-
   return (
     <div className="flex h-full bg-white">
       {/* Main Chat Area */}
@@ -376,7 +306,7 @@ export const ChatPage: React.FC = () => {
           </div>
           
           {/* Sync Status Panel */}
-          <div className="mt-4">
+          <div className="mt-4 space-y-3">
             <SyncStatusPanel />
           </div>
         </div>
@@ -449,12 +379,6 @@ export const ChatPage: React.FC = () => {
                     {message.content}
                   </ReactMarkdown>
                   
-                  {/* Show tool results debug info for assistant messages */}
-                  {message.role === 'assistant' && (
-                    <ToolResultsDebug 
-                      toolResults={message.tool_results || []} 
-                    />
-                  )}
                 </div>
               </div>
             ))

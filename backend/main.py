@@ -35,9 +35,35 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting Financial Agent API")
     await init_db()
+    
+    # Start Gmail polling service
+    try:
+        from services.gmail_polling_service import gmail_polling_service
+        import asyncio
+        
+        # Start polling service in background
+        polling_task = asyncio.create_task(gmail_polling_service.start_polling())
+        logger.info("🚀 Gmail polling service started")
+        
+        # Store task for cleanup
+        app.state.polling_task = polling_task
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to start Gmail polling service: {str(e)}")
+    
     yield
+    
     # Shutdown
     logger.info("Shutting down Financial Agent API")
+    
+    # Stop Gmail polling service
+    try:
+        if hasattr(app.state, 'polling_task'):
+            await gmail_polling_service.stop_polling()
+            app.state.polling_task.cancel()
+            logger.info("🛑 Gmail polling service stopped")
+    except Exception as e:
+        logger.error(f"❌ Error stopping Gmail polling service: {str(e)}")
 
 # Initialize FastAPI app
 app = FastAPI(

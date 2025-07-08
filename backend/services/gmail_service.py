@@ -333,29 +333,108 @@ class GmailService:
         return None
     
     def _parse_email_date(self, date_str: str) -> datetime:
-        """Parse email date string to datetime"""
+        """Parse email date string to datetime with improved format handling"""
         try:
-            # Try different date formats
+            if not date_str:
+                logger.warning("Empty date string provided")
+                return datetime.utcnow()
+            
+            logger.debug(f"Parsing email date: {date_str}")
+            
+            # Clean up the date string
+            date_str = date_str.strip()
+            
+            # Handle special cases like "+0000 (UTC)" format
+            import re
+            tz_suffix_pattern = r'(.+?)\s*([+-]\d{4})\s*\([^)]+\)$'
+            tz_match = re.match(tz_suffix_pattern, date_str)
+            if tz_match:
+                # Convert "Mon, 26 May 2025 11:34:36 +0000 (UTC)" to "Mon, 26 May 2025 11:34:36 +0000"
+                date_str = f"{tz_match.group(1)} {tz_match.group(2)}"
+                logger.debug(f"Cleaned date string with timezone suffix: {date_str}")
+            
+            # Try different date formats that Gmail commonly uses
             formats = [
-                '%a, %d %b %Y %H:%M:%S %z',
-                '%a, %d %b %Y %H:%M:%S %Z',
-                '%d %b %Y %H:%M:%S %z',
-                '%d %b %Y %H:%M:%S %Z',
+                # Standard RFC 2822 formats
+                '%a, %d %b %Y %H:%M:%S %z',        # "Mon, 26 May 2023 14:30:00 +0000"
+                '%a, %d %b %Y %H:%M:%S %Z',        # "Mon, 26 May 2023 14:30:00 UTC"
+                '%d %b %Y %H:%M:%S %z',            # "26 May 2023 14:30:00 +0000"
+                '%d %b %Y %H:%M:%S %Z',            # "26 May 2023 14:30:00 UTC"
+                
+                # Alternative formats
+                '%a, %d %b %Y %H:%M:%S (%Z)',      # "Mon, 26 May 2023 14:30:00 (UTC)"
+                '%a, %d %b %Y %H:%M:%S',           # "Mon, 26 May 2023 14:30:00"
+                '%d %b %Y %H:%M:%S',               # "26 May 2023 14:30:00"
+                
+                # ISO formats
+                '%Y-%m-%dT%H:%M:%S%z',             # "2023-05-26T14:30:00+0000"
+                '%Y-%m-%dT%H:%M:%SZ',              # "2023-05-26T14:30:00Z"
+                '%Y-%m-%d %H:%M:%S',               # "2023-05-26 14:30:00"
+                
+                # Other common formats
+                '%a %b %d %H:%M:%S %Y',            # "Mon May 26 14:30:00 2023"
+                '%a %b %d %H:%M:%S %Z %Y',         # "Mon May 26 14:30:00 UTC 2023"
             ]
             
             for fmt in formats:
                 try:
-                    return datetime.strptime(date_str, fmt)
+                    parsed_date = datetime.strptime(date_str, fmt)
+                    
+                    # If the parsed date doesn't have timezone info, assume UTC
+                    if parsed_date.tzinfo is None:
+                        # Convert to UTC
+                        parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+                        logger.debug(f"Parsed date without timezone, assuming UTC: {parsed_date}")
+                    else:
+                        # Convert to UTC if it has timezone info
+                        parsed_date = parsed_date.astimezone(timezone.utc).replace(tzinfo=None)
+                        logger.debug(f"Parsed date with timezone, converted to UTC: {parsed_date}")
+                    
+                    # Remove timezone info for database storage (we store as UTC)
+                    if parsed_date.tzinfo:
+                        parsed_date = parsed_date.replace(tzinfo=None)
+                    
+                    logger.debug(f"Successfully parsed email date: {date_str} -> {parsed_date}")
+                    return parsed_date
+                    
                 except ValueError:
                     continue
             
-            # If all formats fail, return current time
-            logger.warning(f"Could not parse date: {date_str}")
-            return datetime.now()
+            # Try to handle some special cases with regex
+            import re
+            
+            # Handle timezone offsets like "+0530" or "-0700"
+            tz_pattern = r'(.+?)\s*([+-]\d{4})$'
+            match = re.match(tz_pattern, date_str)
+            if match:
+                date_part = match.group(1)
+                tz_offset = match.group(2)
+                
+                # Try parsing without timezone first
+                for fmt in ['%a, %d %b %Y %H:%M:%S', '%d %b %Y %H:%M:%S']:
+                    try:
+                        parsed_date = datetime.strptime(date_part, fmt)
+                        
+                        # Apply timezone offset
+                        offset_hours = int(tz_offset[:3])
+                        offset_minutes = int(tz_offset[3:]) if len(tz_offset) > 3 else 0
+                        total_offset = timedelta(hours=offset_hours, minutes=offset_minutes)
+                        
+                        # Convert to UTC
+                        utc_date = parsed_date - total_offset
+                        logger.debug(f"Parsed date with manual timezone conversion: {date_str} -> {utc_date}")
+                        return utc_date
+                        
+                    except ValueError:
+                        continue
+            
+            # If all formats fail, log warning and return current time
+            logger.warning(f"Could not parse email date: '{date_str}'. Using current time.")
+            return datetime.utcnow()
             
         except Exception as e:
-            logger.error(f"Error parsing email date: {str(e)}")
-            return datetime.now()
+            logger.error(f"Error parsing email date '{date_str}': {str(e)}")
+            return datetime.utcnow()
     
     def _extract_body_text(self, payload: Dict) -> str:
         """Extract readable text from email payload"""
@@ -591,6 +670,65 @@ class GmailService:
         except Exception as e:
             logger.error(f"Failed to list calendar events: {str(e)}")
             raise e
+
+    async def get_recent_emails(self, user_id: str, since_timestamp: datetime, max_results: int = 50) -> List[Dict[str, Any]]:
+        """
+        Get emails received since the specified timestamp
+        Returns full email details for processing
+        """
+        try:
+            if not self.service:
+                raise Exception("Gmail service not initialized")
+            
+            logger.info(f"Fetching emails since {since_timestamp} for user {user_id}")
+            
+            # Convert timestamp to epoch seconds for Gmail API
+            epoch_timestamp = int(since_timestamp.timestamp())
+            
+            # Query for messages newer than the timestamp
+            query = f"after:{epoch_timestamp}"
+            
+            logger.info(f"Gmail query: {query}, max_results: {max_results}")
+            
+            # Get message IDs
+            request_params = {
+                'userId': 'me',
+                'q': query,
+                'maxResults': max_results
+            }
+            
+            result = self.service.users().messages().list(**request_params).execute()
+            messages = result.get('messages', [])
+            
+            if not messages:
+                logger.info(f"No new messages found since {since_timestamp}")
+                return []
+            
+            logger.info(f"Found {len(messages)} new messages, fetching details...")
+            
+            # Fetch full content for each message
+            email_details = []
+            for msg in messages:
+                try:
+                    message_detail = await self.get_message_content(msg['id'])
+                    if message_detail:
+                        email_details.append(message_detail)
+                except Exception as e:
+                    logger.error(f"Error fetching message {msg['id']}: {str(e)}")
+                    continue
+            
+            # Sort by received date (newest first)
+            email_details.sort(key=lambda x: x.get('received_at', datetime.min), reverse=True)
+            
+            logger.info(f"Successfully fetched details for {len(email_details)} emails")
+            return email_details
+            
+        except HttpError as e:
+            logger.error(f"Gmail API error while fetching recent emails: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get recent emails: {str(e)}")
+            raise
 
 # Global service instance
 gmail_service = GmailService() 

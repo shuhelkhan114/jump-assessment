@@ -14,7 +14,8 @@ celery_app = Celery(
         "tasks.gmail_tasks",
         "tasks.hubspot_tasks", 
         "tasks.ai_tasks",
-        "tasks.auto_sync_tasks"
+        "tasks.auto_sync_tasks",
+        "tasks.workflow_tasks"
     ]
 )
 
@@ -29,22 +30,31 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
-    # Periodic task schedule
+    # Periodic task schedule - Essential maintenance only
+    # Gmail polling service runs independently for real-time email monitoring
     beat_schedule={
+        # Keep token refresh to prevent expired tokens
         'refresh-expiring-tokens': {
             'task': 'tasks.auto_sync_tasks.refresh_expiring_tokens', 
-            'schedule': 900.0,  # Run every 15 minutes (900 seconds) - proactive token refresh
+            'schedule': 900.0,  # Run every 15 minutes - keep tokens valid
         },
+        # Keep workflow maintenance for timeouts and state management
+        'workflow-maintenance': {
+            'task': 'tasks.workflow_tasks.workflow_maintenance',
+            'schedule': 3600.0,  # Run every hour - check timeouts and cleanup
+        },
+        # Keep cleanup for housekeeping
+        'cleanup-completed-workflows': {
+            'task': 'tasks.workflow_tasks.cleanup_completed_workflows',
+            'schedule': 86400.0,  # Run daily - cleanup old workflows
+        },
+        # Gmail polling service runs independently for real-time email monitoring
+        # Email processing now handled by polling service every 10 seconds
     },
 )
 
 # Auto-discover tasks
 celery_app.autodiscover_tasks()
-
-@celery_app.task(bind=True)
-def debug_task(self):
-    logger.info(f"Request: {self.request!r}")
-    return f"Hello from Celery worker!"
 
 if __name__ == "__main__":
     celery_app.start() 
