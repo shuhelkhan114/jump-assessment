@@ -95,74 +95,65 @@ export const ChatPage: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  // App load sync trigger - Check health and potentially trigger sync
-  useEffect(() => {
-    const triggerAppLoadSync = async () => {
-      try {
-        const token = localStorage.getItem('token');
-        if (!token) return;
-
-        // Check if user has any integrations that need initial sync
-        const statusResponse = await fetchWithAuth(API_ENDPOINTS.INTEGRATION_STATUS);
-
-        if (statusResponse.ok) {
-          const integrationStatus = await statusResponse.json();
-          
-          // If user has integrations but we haven't checked health recently, do a health check
-          if (integrationStatus.google || integrationStatus.hubspot) {
-            // Perform health check to refresh tokens if needed
-            await fetchWithAuth(API_ENDPOINTS.INTEGRATION_HEALTH);
-          }
-        }
-      } catch (error) {
-        // Non-critical error, continue normally
-      }
-    };
-
-    // Trigger on app load
-    triggerAppLoadSync();
-  }, []); // Only run once on mount
-
   // Load session from URL parameters
   useEffect(() => {
     const sessionId = searchParams.get('session');
-    if (sessionId && sessionId !== currentSessionId) {
+    console.log('Session ID from URL:', sessionId); // Debug log
+    if (sessionId) {
       setCurrentSessionId(sessionId);
+      loadSessionHistory(sessionId);
+    } else {
+      // If no session ID in URL, clear the current session
+      setCurrentSessionId(null);
+      setMessages([]);
+      setSessionTitle('');
     }
-  }, [searchParams, currentSessionId]);
+  }, [searchParams]);
 
   // Load conversation history when session changes
   useEffect(() => {
+    console.log('Current session ID changed:', currentSessionId); // Debug log
     if (currentSessionId && !isCreatingNewSession) {
       loadSessionHistory(currentSessionId);
-    } else if (!currentSessionId) {
-      // Clear messages if no session
-      setMessages([]);
-      setSessionTitle('');
     }
   }, [currentSessionId, isCreatingNewSession]);
 
   const loadSessionHistory = async (sessionId: string) => {
+    console.log('Loading session history for:', sessionId); // Debug log
     setIsLoadingSession(true);
     try {
       // Load session details
-      const sessionResponse = await fetchWithAuth(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}`);
+      const sessionResponse = await fetchWithAuth(API_ENDPOINTS.CHAT_SESSION(sessionId));
+      console.log('Session details response:', sessionResponse.status); // Debug log
 
       if (sessionResponse.ok) {
         const session = await sessionResponse.json();
+        console.log('Session details:', session); // Debug log
         setSessionTitle(session.title);
+      } else {
+        console.error('Failed to load session details:', sessionResponse.status);
+        // If session not found, clear the session
+        if (sessionResponse.status === 404) {
+          setCurrentSessionId(null);
+          navigate('/chat', { replace: true });
+          return;
+        }
       }
 
       // Load session history
-      const historyResponse = await fetchWithAuth(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}/history`);
+      const historyResponse = await fetchWithAuth(API_ENDPOINTS.CHAT_HISTORY(sessionId));
+      console.log('History response:', historyResponse.status); // Debug log
 
       if (historyResponse.ok) {
         const history: ConversationHistory[] = await historyResponse.json();
+        console.log('Loaded history:', history); // Debug log
         const formattedMessages: ChatMessage[] = history.reverse().flatMap(conv => [
           { role: 'user' as const, content: conv.message },
           { role: 'assistant' as const, content: conv.response }
         ]);
         setMessages(formattedMessages);
+      } else {
+        console.error('Failed to load history:', historyResponse.status);
       }
     } catch (error) {
       console.error('Failed to load session history:', error);
@@ -182,10 +173,12 @@ export const ChatPage: React.FC = () => {
 
     try {
       let sessionId = currentSessionId;
+      console.log('Initial sessionId:', sessionId); // Debug log
       let isNewSession = false;
       
       // If no session exists, create one first
       if (!sessionId) {
+        console.log('Creating new session...'); // Debug log
         setIsCreatingNewSession(true);
         isNewSession = true;
         
@@ -197,27 +190,50 @@ export const ChatPage: React.FC = () => {
           body: JSON.stringify({})
         });
 
-        if (sessionResponse.ok) {
-          const newSession = await sessionResponse.json();
-          sessionId = newSession.session_id;
-          setCurrentSessionId(sessionId);
-          setSessionTitle(newSession.title || 'New Chat');
-          
-          // Update URL to include the new session ID
-          navigate(`/chat?session=${sessionId}`, { replace: true });
-        } else {
+        console.log('Session creation response status:', sessionResponse.status); // Debug log
+
+        if (!sessionResponse.ok) {
           throw new Error('Failed to create chat session');
         }
+
+        const newSession = await sessionResponse.json();
+        console.log('New session response:', newSession); // Debug log
+
+        if (!newSession || !newSession.id) {
+          throw new Error('Invalid session response');
+        }
+
+        sessionId = newSession.id;
+        console.log('New sessionId:', sessionId); // Debug log
+        
+        // Set the session ID first
+        setCurrentSessionId(sessionId);
+        
+        // Then update URL (this will trigger the useEffect to load session)
+        navigate(`/chat?session=${sessionId}`, { replace: true });
+        
+        // Set initial title
+        setSessionTitle(newSession.title || 'New Chat');
       }
 
+      // Ensure we have a valid session ID before sending message
+      if (!sessionId) {
+        throw new Error('No valid session ID available');
+      }
+
+      console.log('Using sessionId for message:', sessionId); // Debug log
+      console.log('API endpoint:', API_ENDPOINTS.CHAT_MESSAGE(sessionId)); // Debug log
+
       // Send message to the session
-      const response = await fetchWithAuth(API_ENDPOINTS.CHAT_MESSAGE(sessionId!), {
+      const response = await fetchWithAuth(API_ENDPOINTS.CHAT_MESSAGE(sessionId), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ message: userMessage })
       });
+
+      console.log('Message send response status:', response.status); // Debug log
 
       if (response.ok) {
         const data: ChatResponse = await response.json();
@@ -230,7 +246,8 @@ export const ChatPage: React.FC = () => {
         // If this was the first message (creating a new session), refresh the session title
         if (isNewSession) {
           try {
-            const sessionResponse = await fetchWithAuth(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}`);
+            console.log('Refreshing session title for sessionId:', sessionId); // Debug log
+            const sessionResponse = await fetchWithAuth(API_ENDPOINTS.CHAT_SESSION(sessionId));
             if (sessionResponse.ok) {
               const session = await sessionResponse.json();
               setSessionTitle(session.title);
@@ -242,13 +259,16 @@ export const ChatPage: React.FC = () => {
           setIsCreatingNewSession(false);
         }
       } else {
+        console.error('Failed to send message:', response.status);
         setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error. Please try again.' }]);
       }
     } catch (error) {
       console.error('Error sending message:', error);
       setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error. Please try again.' }]);
       // Reset the creating new session flag in case of error
-      setIsCreatingNewSession(false);
+      if (isCreatingNewSession) {
+        setIsCreatingNewSession(false);
+      }
     } finally {
       setIsLoading(false);
     }

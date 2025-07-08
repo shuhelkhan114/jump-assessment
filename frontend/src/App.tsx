@@ -6,7 +6,7 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { Navbar } from './components/Navbar';
 import { LoginPage } from './pages/LoginPage';
 import { ChatPage } from './pages/ChatPage';
-import { HistoryPage } from './pages/HistoryPage';
+import HistoryPage from './pages/HistoryPage';
 import AuthCallback from './pages/AuthCallback';
 
 import './index.css';
