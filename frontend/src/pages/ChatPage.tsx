@@ -3,6 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { ChatResponse, ConversationHistory, ToolResult } from '../types/api';
 import { API_ENDPOINTS } from '../config/api';
+import { fetchWithAuth } from '../utils/api';
+import { useAuth } from '../contexts/AuthContext';
 
 // Enhanced message type to include tool results
 interface ChatMessage {
@@ -22,9 +24,7 @@ const HubSpotIntegration: React.FC = () => {
 
   const checkIntegrationStatus = async () => {
     try {
-      const response = await fetch(API_ENDPOINTS.INTEGRATION_STATUS, {
-        credentials: 'include'
-      });
+      const response = await fetchWithAuth(API_ENDPOINTS.INTEGRATION_STATUS);
       if (response.ok) {
         const data = await response.json();
         setIsConnected(data.hubspot);
@@ -37,9 +37,7 @@ const HubSpotIntegration: React.FC = () => {
   const handleConnect = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch(API_ENDPOINTS.HUBSPOT_AUTH_URL, {
-        credentials: 'include'
-      });
+      const response = await fetchWithAuth(API_ENDPOINTS.HUBSPOT_AUTH_URL);
       if (response.ok) {
         const data = await response.json();
         window.location.href = data.auth_url;
@@ -105,9 +103,7 @@ export const ChatPage: React.FC = () => {
         if (!token) return;
 
         // Check if user has any integrations that need initial sync
-        const statusResponse = await fetch(API_ENDPOINTS.INTEGRATION_STATUS, {
-          credentials: 'include'
-        });
+        const statusResponse = await fetchWithAuth(API_ENDPOINTS.INTEGRATION_STATUS);
 
         if (statusResponse.ok) {
           const integrationStatus = await statusResponse.json();
@@ -115,9 +111,7 @@ export const ChatPage: React.FC = () => {
           // If user has integrations but we haven't checked health recently, do a health check
           if (integrationStatus.google || integrationStatus.hubspot) {
             // Perform health check to refresh tokens if needed
-            await fetch(API_ENDPOINTS.INTEGRATION_HEALTH, {
-              credentials: 'include'
-            });
+            await fetchWithAuth(API_ENDPOINTS.INTEGRATION_HEALTH);
           }
         }
       } catch (error) {
@@ -152,11 +146,7 @@ export const ChatPage: React.FC = () => {
     setIsLoadingSession(true);
     try {
       // Load session details
-      const sessionResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}`, {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        }
-      });
+      const sessionResponse = await fetchWithAuth(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}`);
 
       if (sessionResponse.ok) {
         const session = await sessionResponse.json();
@@ -164,11 +154,7 @@ export const ChatPage: React.FC = () => {
       }
 
       // Load session history
-      const historyResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}/history`, {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        }
-      });
+      const historyResponse = await fetchWithAuth(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}/history`);
 
       if (historyResponse.ok) {
         const history: ConversationHistory[] = await historyResponse.json();
@@ -203,11 +189,10 @@ export const ChatPage: React.FC = () => {
         setIsCreatingNewSession(true);
         isNewSession = true;
         
-        const sessionResponse = await fetch(API_ENDPOINTS.CHAT_SESSIONS, {
+        const sessionResponse = await fetchWithAuth(API_ENDPOINTS.CHAT_SESSIONS, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('token')}`
           },
           body: JSON.stringify({})
         });
@@ -226,11 +211,10 @@ export const ChatPage: React.FC = () => {
       }
 
       // Send message to the session
-      const response = await fetch(API_ENDPOINTS.CHAT_MESSAGE(sessionId!), {
+      const response = await fetchWithAuth(API_ENDPOINTS.CHAT_MESSAGE(sessionId!), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
         },
         body: JSON.stringify({ message: userMessage })
       });
@@ -246,11 +230,7 @@ export const ChatPage: React.FC = () => {
         // If this was the first message (creating a new session), refresh the session title
         if (isNewSession) {
           try {
-            const sessionResponse = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}`, {
-              headers: {
-                'Authorization': `Bearer ${localStorage.getItem('token')}`
-              }
-            });
+            const sessionResponse = await fetchWithAuth(`${process.env.REACT_APP_API_URL || 'http://localhost:8000'}/chat/sessions/${sessionId}`);
             if (sessionResponse.ok) {
               const session = await sessionResponse.json();
               setSessionTitle(session.title);

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { AuthStatus, User } from '../types/api';
 import { API_ENDPOINTS } from '../config/api';
+import { fetchWithAuth } from '../utils/api';
 
 interface AuthContextType {
     user: User | null;
@@ -26,9 +27,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
     const checkAuthStatus = async () => {
         try {
-            const response = await fetch(API_ENDPOINTS.AUTH_STATUS, {
-                credentials: 'include'
-            });
+            const response = await fetchWithAuth(API_ENDPOINTS.AUTH_STATUS);
             if (response.ok) {
                 const data = await response.json();
                 setUser(data.user);
@@ -55,7 +54,14 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         window.location.href = API_ENDPOINTS.AUTH_GOOGLE_LOGIN;
     };
 
-    const logout = () => {
+    const logout = async () => {
+        try {
+            await fetchWithAuth(API_ENDPOINTS.AUTH_STATUS, {
+                method: 'POST'
+            });
+        } catch (error) {
+            console.error('Error during logout:', error);
+        }
         localStorage.removeItem('token');
         setUser(null);
         setAuthStatus(null);
