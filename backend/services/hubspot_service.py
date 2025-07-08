@@ -14,10 +14,13 @@ logger = structlog.get_logger()
 class HubSpotService:
     """HubSpot API service for CRM operations"""
     
-    def __init__(self):
+    def __init__(self, access_token: str = None):
+        """Initialize HubSpot service with optional access token"""
         self.client = None
         self.access_token = None
         self.base_url = "https://api.hubapi.com"
+        if access_token:
+            self.initialize_service(access_token)
     
     def initialize_service(self, access_token: str) -> bool:
         """Initialize HubSpot service with OAuth token"""

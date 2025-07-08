@@ -92,7 +92,9 @@ def _execute_search_contacts(user_id: str, action_data: dict) -> dict:
                 raise Exception(f"User {user_id} has no HubSpot access token")
             
             # Initialize HubSpot service
-            hubspot_service = HubSpotService(user.hubspot_access_token)
+            hubspot_service = HubSpotService()
+            if not hubspot_service.initialize_service(user.hubspot_access_token):
+                raise Exception("Failed to initialize HubSpot service")
             
             # Perform search
             search_result = asyncio.run(hubspot_service.search_contacts(query))
@@ -256,7 +258,9 @@ def _execute_create_hubspot_contact(user_id: str, action_data: dict) -> dict:
                 raise Exception(f"User {user_id} has no HubSpot access token")
             
             # Initialize HubSpot service
-            hubspot_service = HubSpotService(user.hubspot_access_token)
+            hubspot_service = HubSpotService()
+            if not hubspot_service.initialize_service(user.hubspot_access_token):
+                raise Exception("Failed to initialize HubSpot service")
             
             # Prepare contact data
             contact_data = {
