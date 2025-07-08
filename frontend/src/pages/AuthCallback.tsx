@@ -2,26 +2,40 @@ import React, { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
-export const AuthCallback: React.FC = () => {
-  const [searchParams] = useSearchParams();
-  const navigate = useNavigate();
-  const { login } = useAuth();
+const AuthCallback = () => {
+    const [searchParams] = useSearchParams();
+    const navigate = useNavigate();
+    const { login, checkAuthStatus } = useAuth();
 
-  useEffect(() => {
-    const token = searchParams.get('token');
-    const error = searchParams.get('error');
+    useEffect(() => {
+        const token = searchParams.get('token');
+        const error = searchParams.get('error');
 
-    if (token) {
-      login(token);
-      navigate('/', { replace: true });
-    } else if (error) {
-      navigate('/login', { replace: true });
-    }
-  }, [searchParams, login, navigate]);
+        const handleCallback = async () => {
+            if (token) {
+                // Store token if needed
+                localStorage.setItem('token', token);
+                // Check auth status which will set the user
+                await checkAuthStatus();
+                navigate('/', { replace: true });
+            } else if (error) {
+                navigate('/login', { replace: true });
+            } else {
+                navigate('/login', { replace: true });
+            }
+        };
 
-  return (
-    <div className="min-h-screen flex items-center justify-center">
-      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
-    </div>
-  );
-}; 
+        handleCallback();
+    }, [searchParams, navigate, checkAuthStatus]);
+
+    return (
+        <div className="flex items-center justify-center min-h-screen">
+            <div className="text-center">
+                <h2 className="text-xl font-semibold mb-4">Authenticating...</h2>
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900 mx-auto"></div>
+            </div>
+        </div>
+    );
+};
+
+export default AuthCallback; 

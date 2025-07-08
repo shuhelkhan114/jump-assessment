@@ -6,6 +6,7 @@ interface AuthContextType {
     user: User | null;
     authStatus: AuthStatus | null;
     isAuthenticated: boolean;
+    isLoading: boolean;
     login: () => void;
     logout: () => void;
     checkAuthStatus: () => Promise<boolean>;
@@ -21,6 +22,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     const [user, setUser] = useState<User | null>(null);
     const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
     const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [isLoading, setIsLoading] = useState(true);
 
     const checkAuthStatus = async () => {
         try {
@@ -44,6 +46,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
             console.error('Error checking auth status:', error);
             setIsAuthenticated(false);
             return false;
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -66,6 +70,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         user,
         authStatus,
         isAuthenticated,
+        isLoading,
         login,
         logout,
         checkAuthStatus

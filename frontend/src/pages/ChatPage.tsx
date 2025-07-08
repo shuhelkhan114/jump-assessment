@@ -226,7 +226,7 @@ export const ChatPage: React.FC = () => {
       }
 
       // Send message to the session
-      const response = await fetch(API_ENDPOINTS.CHAT_MESSAGE(sessionId), {
+      const response = await fetch(API_ENDPOINTS.CHAT_MESSAGE(sessionId!), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

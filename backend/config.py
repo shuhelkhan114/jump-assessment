@@ -3,6 +3,7 @@ import os
 from functools import lru_cache
 
 class Settings(BaseSettings):
+    # Database settings
     database_url: str = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/financial_agent")
     redis_url: str = os.getenv("REDIS_URL", "redis://redis:6379")
     
@@ -22,6 +23,17 @@ class Settings(BaseSettings):
     # App settings
     frontend_url: str = os.getenv("FRONTEND_URL", "http://localhost:3000")
     secret_key: str = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
+    debug: bool = os.getenv("DEBUG", "false").lower() == "true"
+
+    # Database settings
+    echo: bool = debug  # SQLAlchemy echo setting
+
+    # Gmail settings
+    gmail_batch_size: int = 100
+    gmail_max_results: int = 1000
+
+    # HubSpot settings
+    hubspot_batch_size: int = 100
 
     class Config:
         env_file = ".env"
